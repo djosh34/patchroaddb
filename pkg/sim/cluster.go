@@ -154,9 +154,9 @@ func startCluster(ctx context.Context, n int, s3 *fakes3.Server) (*cluster, erro
 		go c.watch(nd)
 	}
 
-	// patchroaddb init, from a machine of its own: the CLI exits when it is
-	// done. Until the first node serves SQL, it runs again every few
-	// seconds; once the cluster is up, a further init would only fail.
+	// patchroaddb init, from a machine of its own: the CLI retries until
+	// the first node answers, and exits when it is done. A node that stops
+	// meanwhile is a failure; the harness does not wait for init forever.
 	initM := gosim.NewMachine(gosim.MachineConfig{
 		Label: "init",
 		Addr:  netip.MustParseAddr(initAddr),
@@ -164,16 +164,19 @@ func startCluster(ctx context.Context, n int, s3 *fakes3.Server) (*cluster, erro
 			runCLI("init", "--insecure", fmt.Sprintf("--host=%s:%d", nodeAddr(0), sqlPort))
 		},
 	})
-	for attempt := 1; ; attempt++ {
+	initDone := make(chan struct{})
+	go func() {
 		initM.Wait()
-		err := waitSQL(ctx, nodeAddr(0), 10*time.Second)
-		if err == nil {
-			break
-		}
-		if attempt == 10 {
-			return c, errors.Wrap(err, "the cluster did not start after 10 runs of init")
-		}
-		initM.Restart()
+		close(initDone)
+	}()
+	select {
+	case <-initDone:
+	case <-time.After(2 * time.Minute):
+		initM.Crash()
+		<-initDone
+	}
+	if failed := c.failed(); len(failed) > 0 {
+		return c, errors.Newf("while the cluster started: %s", strings.Join(failed, "; "))
 	}
 
 	for _, nd := range c.nodes {
