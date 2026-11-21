@@ -871,16 +871,6 @@ func subtractNetworkCounters(from *net.IOCountersStat, sub net.IOCountersStat) {
 	from.Dropout -= sub.Dropout
 }
 
-// GetProcCPUTime returns the cumulative user/system time (in ms) since the process start.
-func GetProcCPUTime(ctx context.Context) (userTimeMillis, sysTimeMillis int64, err error) {
-	pid := os.Getpid()
-	cpuTime := gosigar.ProcTime{}
-	if err := cpuTime.Get(pid); err != nil {
-		return 0, 0, err
-	}
-	return int64(cpuTime.User), int64(cpuTime.Sys), nil
-}
-
 // getCPUCapacity returns the number of logical CPU processors available for
 // use by the process. The capacity accounts for cgroup constraints, GOMAXPROCS
 // and the number of host processors.
