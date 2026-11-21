@@ -33,7 +33,7 @@ jobs:
           key: sim-gosim-${{ github.sha }}
       - name: List the unimplemented hooks the binary reaches
         continue-on-error: true
-        run: .gosim/bin/gosim build-tests -tags noasm -allow-unimplemented /dev/null ./pkg/sim 2>&1 | tail -200
+        run: .gosim/bin/gosim build-tests -tags noasm,disableunsafe -allow-unimplemented /dev/null ./pkg/sim 2>&1 | tail -200
       - name: Replay seed 1
         run: |
           set -o pipefail

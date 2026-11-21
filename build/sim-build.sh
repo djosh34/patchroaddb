@@ -5,8 +5,8 @@
 #   sim.test        the native driver: TestCampaign, TestReplay, TestPlanted
 #   sim-gosim.test  pkg/sim translated by gosim, in which TestSeed runs
 #
-# The translated binary is built with the tag noasm, and with PLANTED=1
-# also with the planted bugs
+# The translated binary is built with the tags noasm and disableunsafe, and
+# with PLANTED=1 also with the planted bugs
 # (pkg/util/planted). Usage: [PLANTED=1] build/sim-build.sh [OUT]
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -15,10 +15,12 @@ mkdir -p "$out"
 cd "$root"
 go build -C tools/gosim -o "$root/.gosim/bin/gosim" github.com/jellevandenhooff/gosim/cmd/gosim
 # noasm picks the pure Go code of libraries such as klauspost/compress and
-# snappy: gosim drops assembly outside the standard library.
-tags=noasm
+# snappy: gosim drops assembly outside the standard library. disableunsafe
+# keeps testify's copy of go-spew from reading reflect.Value's fields, which
+# gosim's reflect does not have.
+tags=noasm,disableunsafe
 if [[ -n ${PLANTED:-} ]]; then
-  tags=noasm,planted
+  tags=$tags,planted
 fi
 rm -rf .gosim/metatest
 .gosim/bin/gosim build-tests -tags "$tags" ./pkg/sim
