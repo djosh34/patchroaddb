@@ -213,7 +213,8 @@ func TestCampaign(t *testing.T) {
 
 // TestReplay runs SIM_SEED twice and checks that both runs are the same
 // (build/sim-replay.sh). It fails if they differ or if the seed failed. The
-// first run's log goes to SIM_OUT.
+// first run's log goes to SIM_OUT/log.txt, and the second's to log-2.txt
+// when the runs differ.
 func TestReplay(t *testing.T) {
 	bin := simEnv("SIM_BINARY")
 	if bin == "" || simEnv("SIM_SEED") == "" {
@@ -223,28 +224,37 @@ func TestReplay(t *testing.T) {
 	wall := time.Duration(envInt(t, "SIM_WALL_MINUTES", 20)) * time.Minute
 	planted := simEnv("PATCHROADDB_PLANTED")
 	out := simEnv("SIM_OUT")
-	res, err := metatesting.ForTestBinary(t, bin).RunQuiet(&metatesting.RunConfig{
-		Test: "TestSeed", Seed: seed, ExtraEnv: []string{"PATCHROADDB_PLANTED=" + planted}, WallKill: wall,
-	})
-	if err != nil {
-		t.Fatal(err)
+	run := func() *metatesting.RunResult {
+		res, err := metatesting.ForTestBinary(t, bin).RunQuiet(&metatesting.RunConfig{
+			Test: "TestSeed", Seed: seed, ExtraEnv: []string{"PATCHROADDB_PLANTED=" + planted}, WallKill: wall,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
 	}
-	if out != "" {
+	write := func(name string, res *metatesting.RunResult) {
+		if out == "" {
+			return
+		}
 		if err := os.MkdirAll(out, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(out, "log.txt"), readableLog(res.LogOutput), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(out, name), readableLog(res.LogOutput), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	t.Logf("seed %d: failed %v %s", seed, res.Failed, res.Err)
-	again := runSeed(t, bin, seed, planted, wall, "")
-	if !bytes.Equal(again.checksum, res.Checksum) || again.failed != res.Failed {
-		t.Errorf("seed %d: the second run differs from the first: checksum %x, failed %v, against %x, failed %v (%s)",
-			seed, res.Checksum, res.Failed, again.checksum, again.failed, again.reason)
+	first := run()
+	write("log.txt", first)
+	t.Logf("seed %d: failed %v %s", seed, first.Failed, first.Err)
+	second := run()
+	if !bytes.Equal(first.Checksum, second.Checksum) || first.Failed != second.Failed {
+		write("log-2.txt", second)
+		t.Errorf("seed %d: the second run differs from the first: checksum %x, failed %v, against %x, failed %v",
+			seed, first.Checksum, first.Failed, second.Checksum, second.Failed)
 	}
-	if res.Failed {
-		t.Errorf("seed %d failed: %s", seed, res.Err)
+	if first.Failed {
+		t.Errorf("seed %d failed: %s", seed, first.Err)
 	}
 }
 
