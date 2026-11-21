@@ -24,8 +24,19 @@ jobs:
           path: .gosim/cache.sqlite3
           key: sim-gosim-${{ github.sha }}
           restore-keys: sim-gosim-
+      # Translating the tree peaks near the runner's 16 GB of memory; the
+      # swap keeps the kernel from stopping the job.
+      - name: Add 8 GB of swap
+        run: |
+          sudo fallocate -l 8G /swap-sim
+          sudo chmod 600 /swap-sim
+          sudo mkswap /swap-sim >/dev/null
+          sudo swapon /swap-sim
+          free -g
       - name: Build
         run: /usr/bin/time -v build/sim-build.sh bin/sim
+        env:
+          GOSIM_TRANSLATE_WORKERS: "8"
       - if: always()
         uses: actions/cache/save@v4
         with:
@@ -34,6 +45,8 @@ jobs:
       - name: List the unimplemented hooks the binary reaches
         continue-on-error: true
         run: .gosim/bin/gosim build-tests -tags noasm,disableunsafe -allow-unimplemented /dev/null ./pkg/sim 2>&1 | tail -200
+        env:
+          GOSIM_TRANSLATE_WORKERS: "8"
       - name: Replay seed 1
         run: |
           set -o pipefail
