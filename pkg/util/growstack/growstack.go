@@ -8,6 +8,8 @@
 // ANY KIND, either express or implied. See the License for the specific language
 // governing permissions and limitations under the License.
 
+//go:build !sim
+
 package growstack
 
 // Grow grows the goroutine stack by 32 KB. Goroutine stacks currently start

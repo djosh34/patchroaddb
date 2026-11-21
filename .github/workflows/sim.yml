@@ -49,7 +49,7 @@ env:
 
 jobs:
   plan:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 5
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
@@ -73,7 +73,7 @@ jobs:
           echo "shards=$(seq -s, 0 $((jobs - 1)) | sed 's/^/[/; s/$/]/')" >>"$GITHUB_OUTPUT"
 
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -103,7 +103,7 @@ jobs:
   seeds:
     if: inputs.planted != 'all'
     needs: [plan, build]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 345
     strategy:
       fail-fast: false
@@ -156,7 +156,7 @@ jobs:
   summary:
     if: always() && inputs.planted != 'all'
     needs: [plan, seeds]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -169,7 +169,7 @@ jobs:
   planted:
     if: inputs.planted == 'all'
     needs: build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 345
     strategy:
       fail-fast: false
