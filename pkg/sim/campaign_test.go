@@ -239,7 +239,8 @@ func TestReplay(t *testing.T) {
 	t.Logf("seed %d: failed %v %s", seed, res.Failed, res.Err)
 	again := runSeed(t, bin, seed, planted, wall, "")
 	if !bytes.Equal(again.checksum, res.Checksum) || again.failed != res.Failed {
-		t.Errorf("seed %d: the second run differs from the first", seed)
+		t.Errorf("seed %d: the second run differs from the first: checksum %x, failed %v, against %x, failed %v (%s)",
+			seed, res.Checksum, res.Failed, again.checksum, again.failed, again.reason)
 	}
 }
 
