@@ -5,8 +5,8 @@ go 1.27.4
 tool github.com/jellevandenhooff/gosim/cmd/gosim
 
 replace (
-	github.com/jellevandenhooff/gosim => github.com/djosh34/gosim v0.0.0-20261121215920-c328241c68ae
-	github.com/jellevandenhooff/gosim/cmd/gosim => github.com/djosh34/gosim/cmd/gosim v0.0.0-20261121215920-c328241c68ae
+	github.com/jellevandenhooff/gosim => github.com/djosh34/gosim v0.0.0-20261121223426-f30018523025
+	github.com/jellevandenhooff/gosim/cmd/gosim => github.com/djosh34/gosim/cmd/gosim v0.0.0-20261121223426-f30018523025
 )
 
 require (
