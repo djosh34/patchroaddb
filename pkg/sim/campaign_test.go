@@ -212,7 +212,8 @@ func TestCampaign(t *testing.T) {
 }
 
 // TestReplay runs SIM_SEED twice and checks that both runs are the same
-// (build/sim-replay.sh). The first run's log goes to SIM_OUT.
+// (build/sim-replay.sh). It fails if they differ or if the seed failed. The
+// first run's log goes to SIM_OUT.
 func TestReplay(t *testing.T) {
 	bin := simEnv("SIM_BINARY")
 	if bin == "" || simEnv("SIM_SEED") == "" {
@@ -241,6 +242,9 @@ func TestReplay(t *testing.T) {
 	if !bytes.Equal(again.checksum, res.Checksum) || again.failed != res.Failed {
 		t.Errorf("seed %d: the second run differs from the first: checksum %x, failed %v, against %x, failed %v (%s)",
 			seed, res.Checksum, res.Failed, again.checksum, again.failed, again.reason)
+	}
+	if res.Failed {
+		t.Errorf("seed %d failed: %s", seed, res.Err)
 	}
 }
 
