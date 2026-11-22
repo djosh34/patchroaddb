@@ -73,7 +73,8 @@ type scenario struct {
 	runFor   time.Duration
 	// think is a worker's mean pause between two statements. Without it
 	// the workers send tens of thousands of statements a seed, which costs
-	// minutes of CPU, where a thousand already contend.
+	// minutes of CPU, where a few hundred already contend. With runFor, it
+	// keeps a seed near 10 CPU-seconds.
 	think time.Duration
 
 	mu       syncutil.Mutex
@@ -101,8 +102,8 @@ func newScenario(rng *rand.Rand, e env) *scenario {
 		tables:   genSchema(rng),
 		workers:  2 + rng.IntN(4),
 		accounts: 3 + rng.IntN(5),
-		runFor:   time.Duration(20+rng.IntN(40)) * time.Second,
-		think:    time.Duration(50+rng.IntN(200)) * time.Millisecond,
+		runFor:   time.Duration(15+rng.IntN(20)) * time.Second,
+		think:    time.Duration(100+rng.IntN(300)) * time.Millisecond,
 		ledger:   make(map[int]*ledgerKey),
 		stats:    make(map[string]int),
 	}
