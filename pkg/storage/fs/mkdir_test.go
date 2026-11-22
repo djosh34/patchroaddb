@@ -180,7 +180,7 @@ func (fs *failOpenDirOnce) OpenDir(name string) (vfs.File, error) {
 func TestMkdirAllStoreDirRetryAfterSyncError(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	for _, path := range []string{"/data", "/a/b/"} {
+	for _, path := range []string{"/data", "/a/b"} {
 		t.Run(path, func(t *testing.T) {
 			fs := &failOpenDirOnce{MemFS: vfs.NewStrictMem(), dir: "/"}
 			require.Error(t, MkdirAllStoreDir(fs, path, os.ModePerm))
@@ -190,4 +190,17 @@ func TestMkdirAllStoreDirRetryAfterSyncError(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+// TestMkdirAllStoreDirRefusesUncleanPath checks that MkdirAllStoreDir
+// creates nothing for a path that is not clean.
+func TestMkdirAllStoreDirRefusesUncleanPath(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	fs := vfs.NewMem()
+	for _, path := range []string{"/a/b/", "/a/./b", "/a/b/.", "/a/x/../b", "a//b"} {
+		require.ErrorContains(t, MkdirAllStoreDir(fs, path, os.ModePerm), "not a clean path", path)
+	}
+	_, err := fs.Stat("/a")
+	require.True(t, oserror.IsNotExist(err))
 }

@@ -12,7 +12,7 @@ package fs
 
 import (
 	"os"
-	"strings"
+	"path/filepath"
 
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/errors/oserror"
@@ -44,15 +44,18 @@ func MkdirAllAndSyncParents(fs vfs.FS, path string, perm os.FileMode) error {
 // start, would find them there and skip their sync, and a crash could then
 // lose the store. Nothing else may create those directories meanwhile, as
 // holds on start, when the store directories are created one at a time.
+//
+// The path must be clean, as the CLI makes store paths: with "..", "." or
+// a trailing separator, the directories it walks to sync and remove would
+// not be the ones MkdirAll creates.
 func MkdirAllStoreDir(fs vfs.FS, path string, perm os.FileMode) error {
+	if filepath.Clean(path) != path {
+		return errors.Newf("store directory %q is not a clean path", path)
+	}
 	return mkdirAllAndSyncParents(fs, path, perm, true /* undo */)
 }
 
 func mkdirAllAndSyncParents(fs vfs.FS, path string, perm os.FileMode, undo bool) error {
-	// A trailing separator would name the same directory twice below.
-	if trimmed := strings.TrimRight(path, "/"); trimmed != "" {
-		path = trimmed
-	}
 	// Find the lowest existing directory in the hierarchy.
 	var exists string
 	for dir, parent := path, ""; ; dir = parent {
