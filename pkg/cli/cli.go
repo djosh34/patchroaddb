@@ -51,6 +51,13 @@ import (
 // to be the body of an action package main `main` func elsewhere. It is
 // abstracted for reuse by duplicated `main` funcs in different distributions.
 func Main() {
+	exit.WithCode(MainCode())
+}
+
+// MainCode runs the command in os.Args as Main does, and returns the code
+// Main exits with. The simulation (pkg/sim) runs nodes with it, to tell a
+// node that stops on its own from one it crashed.
+func MainCode() exit.Code {
 	if len(os.Args) == 1 {
 		os.Args = append(os.Args, "help")
 	}
@@ -78,7 +85,7 @@ func Main() {
 	// Finally, gracefully shutdown logging facilities.
 	cliCtx.logShutdownFn()
 
-	exit.WithCode(errCode)
+	return errCode
 }
 
 func getExitCode(err error) (errCode exit.Code) {

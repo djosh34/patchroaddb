@@ -24,7 +24,9 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/cli"
+	"github.com/cockroachdb/cockroach/pkg/cli/exit"
 	"github.com/cockroachdb/cockroach/pkg/sim/fakes3"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
 	"github.com/jellevandenhooff/gosim"
@@ -50,6 +52,8 @@ type node struct {
 	state nodeState
 	// syncFaults is set while the node's fsyncs may crash it.
 	syncFaults bool
+	// exited, if set, says why the node's process ended on its own.
+	exited string
 }
 
 type nodeState int
@@ -122,15 +126,31 @@ func startArgs(addr, join string) []string {
 
 // nodeMain is the main function of a node's machine: it writes the config
 // file, if it is not there from an earlier start, and starts patchroaddb.
-func nodeMain(args []string) func() {
+// It records a node that exits, or calls log.Fatal, as stopped on its own:
+// a failure, also while the node's fsyncs may crash it, which watch could
+// otherwise not tell apart.
+func (c *cluster) nodeMain(nd *node, args []string) func() {
 	return func() {
 		s3Env()
 		if err := os.WriteFile("/sim.yaml", []byte(nodeConfig), 0o644); err != nil {
-			fmt.Fprintf(os.Stderr, "writing the config: %v\n", err)
+			c.exited(nd, fmt.Sprintf("writing the config: %v", err))
 			return
 		}
-		runCLI(args...)
+		log.SetExitFunc(false /* hideStack */, func(code exit.Code) {
+			c.exited(nd, fmt.Sprintf("log.Fatal, exit code %s", code))
+			exit.WithCode(code)
+		})
+		os.Args = append([]string{"patchroaddb"}, args...)
+		code := cli.MainCode()
+		c.exited(nd, fmt.Sprintf("exit code %s", code))
 	}
+}
+
+// exited records that the node's process ended on its own, and why.
+func (c *cluster) exited(nd *node, why string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	nd.exited = why
 }
 
 // startCluster starts the fake S3 server and n nodes, initializes the
@@ -157,7 +177,7 @@ func startCluster(ctx context.Context, n int, s3 *fakes3.Server, rng *rand.Rand)
 		nd.m = gosim.NewMachine(gosim.MachineConfig{
 			Label:    fmt.Sprintf("n%d", i+1),
 			Addr:     netip.MustParseAddr(nd.addr),
-			MainFunc: nodeMain(startArgs(nd.addr, strings.Join(join, ","))),
+			MainFunc: c.nodeMain(nd, startArgs(nd.addr, strings.Join(join, ","))),
 		})
 		c.nodes = append(c.nodes, nd)
 		go c.watch(nd)
@@ -253,6 +273,12 @@ func (c *cluster) watch(nd *node) {
 func (c *cluster) stopped(nd *node) nodeState {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if nd.exited != "" {
+		// The process ended itself, whatever the faults: a crash of
+		// patchroaddb. The node stays down.
+		c.failures = append(c.failures, fmt.Sprintf("n%d stopped on its own: %s", nd.idx+1, nd.exited))
+		return up
+	}
 	if nd.state == up && nd.syncFaults {
 		nd.state = crashedInSync
 	}
@@ -300,6 +326,7 @@ func (c *cluster) crash(i int) bool {
 // the writes it had not synced reaches the disk.
 func (c *cluster) restart(i int, partial bool) {
 	nd := c.nodes[i]
+	c.exited(nd, "")
 	if partial {
 		nd.m.RestartWithPartialDisk()
 	} else {
@@ -365,7 +392,7 @@ func (c *cluster) startRestoreNode(ctx context.Context) (string, error) {
 	nd.m = gosim.NewMachine(gosim.MachineConfig{
 		Label:    "restore",
 		Addr:     netip.MustParseAddr(nd.addr),
-		MainFunc: nodeMain(args),
+		MainFunc: c.nodeMain(nd, args),
 	})
 	go c.watch(nd)
 	c.addLatencies(append([]string{s3Addr, nd.addr}, c.addrs()...))

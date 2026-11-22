@@ -216,8 +216,8 @@ type query struct {
 	comparable bool
 }
 
-// render returns the query with a FORCE_INDEX hint of index ord of each
-// table, or none for ord -1.
+// render returns the query with each table's name followed by hint(t): a
+// FORCE_INDEX hint, or nothing.
 func (q query) render(hint func(t table) string) string {
 	args := make([]any, len(q.tables))
 	for i, t := range q.tables {

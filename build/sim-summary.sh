@@ -7,6 +7,9 @@
 # Usage: build/sim-summary.sh <dir> <first> <seeds>
 set -euo pipefail
 dir=$1 first=$2 seeds=$3
+for v in "$first" "$seeds"; do
+  [[ $v =~ ^[0-9]+$ ]] || { echo "$v is not a number"; exit 1; }
+done
 mapfile -t files < <(find "$dir" -name 'summary-*.json' | sort)
 if [[ ${#files[@]} == 0 ]]; then
   echo "no summaries in $dir: no seed ran"

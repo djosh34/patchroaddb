@@ -355,7 +355,7 @@ func (s *scenario) recordLedger(k int, v int64, acked bool) bool {
 		s.ledger[k] = lk
 	}
 	if acked {
-		lk.acked, lk.hasAcked, lk.ambiguous = v, true, nil
+		lk.acked, lk.hasAcked = v, true
 	} else {
 		lk.ambiguous = append(lk.ambiguous, v)
 	}
@@ -580,7 +580,7 @@ func (s *scenario) check(ctx context.Context) error {
 	for k, lk := range s.ledger {
 		v, ok := found[k]
 		if !lk.allows(v, ok) {
-			s.fail("ledger key %d holds %d (present %v), but the last acknowledged write was %d (acknowledged %v), with %v unknown after it",
+			s.fail("ledger key %d holds %d (present %v), but the last acknowledged write was %d (acknowledged %v), with %v of unknown outcome",
 				k, v, ok, lk.acked, lk.hasAcked, lk.ambiguous)
 		}
 	}

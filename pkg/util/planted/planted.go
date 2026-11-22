@@ -34,6 +34,3 @@ const (
 	// replay.
 	LostSegment = "lost-segment"
 )
-
-// All lists the planted bugs.
-var All = []string{LostSync, SkipRefresh, WrongFilter, InternalError, LostSegment}

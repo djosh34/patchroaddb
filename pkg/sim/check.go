@@ -93,8 +93,11 @@ func diffResult(a, b result) string {
 }
 
 // ledgerKey is what the harness knows of one key of the ledger table: the
-// last value whose write was acknowledged, and the values written after it
-// whose outcome is unknown.
+// last value whose write was acknowledged, and every value whose write's
+// outcome is unknown. Such a write may take effect at any time, also after
+// a later acknowledged write to the key, so its value stays allowed. Each
+// value is written once, so an acknowledged write that is lost shows as an
+// older acknowledged value or no row.
 type ledgerKey struct {
 	acked     int64
 	hasAcked  bool

@@ -178,19 +178,22 @@ jobs:
         with:
           pattern: sim-out-*
           path: out
-      - run: |
+      - env:
+          FIRST: ${{ inputs.first }}
+          SEEDS: ${{ inputs.seeds }}
+        run: |
           set -o pipefail
-          build/sim-summary.sh out ${{ inputs.first }} ${{ inputs.seeds }} | tee -a "$GITHUB_STEP_SUMMARY"
+          build/sim-summary.sh out "$FIRST" "$SEEDS" | tee -a "$GITHUB_STEP_SUMMARY"
 
   planted:
     if: inputs.planted == 'all'
-    needs: build
+    needs: [plan, build]
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 345
     strategy:
       fail-fast: false
       matrix:
-        # pkg/util/planted.All, with each bug's seed budget.
+        # The bugs of pkg/util/planted, with each bug's seed budget.
         include:
           - {bug: lost-sync, budget: 30}
           - {bug: skip-refresh, budget: 30}
@@ -206,11 +209,13 @@ jobs:
       - name: Catch ${{ matrix.bug }}
         env:
           PATCHROADDB_PLANTED: ${{ matrix.bug }}
+          SIM_FIRST: ${{ inputs.first }}
+          SIM_COUNT: ${{ matrix.budget }}
         run: |
           chmod +x bin/sim/*.test
           cd pkg/sim
-          SIM_BINARY=$GITHUB_WORKSPACE/bin/sim/sim-gosim.test SIM_FIRST=${{ inputs.first }} SIM_COUNT=${{ matrix.budget }} \
-            SIM_OUT=$RUNNER_TEMP/out "$GITHUB_WORKSPACE/bin/sim/sim.test" -test.run '^TestPlanted$' -test.v -test.timeout 340m
+          SIM_BINARY=$GITHUB_WORKSPACE/bin/sim/sim-gosim.test SIM_OUT=$RUNNER_TEMP/out \
+            "$GITHUB_WORKSPACE/bin/sim/sim.test" -test.run '^TestPlanted$' -test.v -test.timeout 340m
       - if: always()
         uses: actions/upload-artifact@v4
         with:

@@ -79,21 +79,7 @@ func runSeed(
 		}
 	}
 	if o.failed && out != "" {
-		dir := filepath.Join(out, fmt.Sprintf("seed-%d", seed))
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		write := func(name string, data []byte) {
-			if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
-				t.Fatal(err)
-			}
-		}
-		write("error.txt", []byte(o.reason+"\n"))
-		replay := fmt.Sprintf("build/sim-replay.sh %d", seed)
-		if planted != "" {
-			replay += " " + planted
-		}
-		write("replay.txt", []byte(fmt.Sprintf("commit %s\n%s\n", simEnv("GITHUB_SHA"), replay)))
+		write := saveSeed(t, out, seed, planted, o.reason)
 		if res != nil {
 			// Every simulated machine's output, the nodes' logs included,
 			// one JSON object a line.
@@ -121,6 +107,29 @@ func sameRun(checksumA, logA, checksumB, logB []byte) bool {
 		return true
 	}
 	return bytes.Equal(hexAddress.ReplaceAll(logA, []byte("0x")), hexAddress.ReplaceAll(logB, []byte("0x")))
+}
+
+// saveSeed makes out/seed-<seed>/ for a failing seed, with its error and
+// how to replay it, and returns a function that writes more files there.
+func saveSeed(
+	t *testing.T, out string, seed int64, planted, reason string,
+) func(name string, data []byte) {
+	dir := filepath.Join(out, fmt.Sprintf("seed-%d", seed))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name string, data []byte) {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("error.txt", []byte(reason+"\n"))
+	replay := fmt.Sprintf("build/sim-replay.sh %d", seed)
+	if planted != "" {
+		replay += " " + planted
+	}
+	write("replay.txt", []byte(fmt.Sprintf("commit %s\n%s\n", simEnv("GITHUB_SHA"), replay)))
+	return write
 }
 
 // readableLog turns the JSON lines of a gosim run's log into text: the
@@ -215,10 +224,20 @@ func TestCampaign(t *testing.T) {
 		s.CPUSeconds += o.cpuSeconds
 		s.WallSecs += o.wall.Seconds()
 		if !o.failed && seed%100 == 0 {
-			again := runSeed(t, bin, seed, planted, wall, "")
+			// A second run that fails saves its log, as any failing run.
+			again := runSeed(t, bin, seed, planted, wall, out)
 			s.Replayed++
-			if again.failed || !sameRun(o.checksum, o.log, again.checksum, again.log) {
-				o.failed, o.reason = true, fmt.Sprintf("the seed's second run differs from its first: %s", again.reason)
+			switch {
+			case again.failed:
+				o.failed, o.reason = true, fmt.Sprintf("the seed passed, then failed when run again: %s", again.reason)
+			case !sameRun(o.checksum, o.log, again.checksum, again.log):
+				o.failed, o.reason = true, "the seed's second run differs from its first"
+				if out != "" {
+					// Both runs passed, so neither saved its log.
+					write := saveSeed(t, out, seed, planted, o.reason)
+					write("log.txt", readableLog(o.log))
+					write("log-2.txt", readableLog(again.log))
+				}
 			}
 		}
 		if o.failed {
