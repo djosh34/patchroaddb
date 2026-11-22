@@ -12,6 +12,7 @@ package fs
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -220,15 +221,29 @@ func TestMkdirAllStoreDirRefusesUnreadableParent(t *testing.T) {
 	require.True(t, oserror.IsPermission(err), "%v", err)
 }
 
-// TestMkdirAllStoreDirRefusesUncleanPath checks that MkdirAllStoreDir
-// creates nothing for a path that is not clean.
-func TestMkdirAllStoreDirRefusesUncleanPath(t *testing.T) {
+// TestMkdirAllStoreDirResolvesLinks checks that on disk the directories
+// MkdirAllStoreDir syncs are those of the directory the system creates: a
+// path through a symbolic link, with a trailing separator or with ".."
+// after the link, names the link target's directories.
+func TestMkdirAllStoreDirResolvesLinks(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	fs := vfs.NewMem()
-	for _, path := range []string{"/a/b/", "/a/./b", "/a/b/.", "/a/x/../b", "a//b"} {
-		require.ErrorContains(t, MkdirAllStoreDir(fs, path, os.ModePerm), "not a clean path", path)
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "disk", "sub"), 0755))
+	link := filepath.Join(tmp, "link")
+	require.NoError(t, os.Symlink(filepath.Join(tmp, "disk", "sub"), link))
+
+	for path, want := range map[string]string{
+		filepath.Join(link, "store") + "/":     filepath.Join(tmp, "disk", "sub", "store"),
+		link + "/../store2":                    filepath.Join(tmp, "disk", "store2"),
+		filepath.Join(tmp, ".", "plain") + "/": filepath.Join(tmp, "plain"),
+	} {
+		require.NoError(t, MkdirAllStoreDir(vfs.Default, path, 0755), path)
+		got, err := createdDir(vfs.Default, path)
+		require.NoError(t, err)
+		require.Equal(t, want, got, path)
+		_, err = os.Stat(want)
+		require.NoError(t, err, path)
 	}
-	_, err := fs.Stat("/a")
-	require.True(t, oserror.IsNotExist(err))
 }

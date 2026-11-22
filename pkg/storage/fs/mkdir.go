@@ -79,18 +79,15 @@ func MkdirAllAndSyncParents(fs vfs.FS, path string, perm os.FileMode) error {
 // created it and stopped before its sync, and a crash would then lose the
 // store. A parent it cannot sync, also for lack of read permission, fails
 // the call: the store would not be durable.
-//
-// The path must be clean, as the CLI makes store paths: with "..", "." or
-// a trailing separator, the directories it syncs would not be the ones
-// MkdirAll creates.
 func MkdirAllStoreDir(fs vfs.FS, path string, perm os.FileMode) error {
-	if filepath.Clean(path) != path {
-		return errors.Newf("store directory %q is not a clean path", path)
-	}
 	if err := fs.MkdirAll(path, perm); err != nil {
 		return errors.Wrapf(err, "could not create all directories: %s", path)
 	}
-	for dir := path; ; {
+	dir, err := createdDir(fs, path)
+	if err != nil {
+		return err
+	}
+	for {
 		parent := fs.PathDir(dir)
 		if parent == dir {
 			return nil
@@ -101,6 +98,19 @@ func MkdirAllStoreDir(fs vfs.FS, path string, perm os.FileMode) error {
 		}
 		dir = parent
 	}
+}
+
+// createdDir is the directory that MkdirAll(path) creates. On disk, that is
+// path with its symbolic links resolved, as the system resolves them: its
+// ancestors on disk are the ones to sync, not those of a link, and a ".."
+// after a link leads to the link target's parent. An in-memory filesystem
+// has no links, so there it is path cleaned.
+func createdDir(fs vfs.FS, path string) (string, error) {
+	if fs != vfs.Default {
+		return filepath.Clean(path), nil
+	}
+	dir, err := filepath.EvalSymlinks(path)
+	return dir, errors.Wrapf(err, "resolving %s", path)
 }
 
 // syncDir syncs the directory dir.

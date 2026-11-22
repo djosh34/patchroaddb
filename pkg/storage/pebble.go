@@ -1056,6 +1056,7 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (p *Pebble, err error) {
 
 	// Wrap the FS with disk health-checking and ENOSPC-detection.
 	var filesystemCloser io.Closer
+	baseFS := opts.FS
 	opts.FS, filesystemCloser = wrapFilesystemMiddleware(opts)
 	opts.FS = markerSyncFS{FS: opts.FS, dir: cfg.Dir}
 	defer func() {
@@ -1063,16 +1064,18 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (p *Pebble, err error) {
 			filesystemCloser.Close()
 		}
 	}()
-	// mkdir syncs the parents of the directories it creates: a store
-	// directory whose entry is lost in a crash loses the whole store. An
-	// in-memory filesystem has no current directory, so a relative path
-	// there has no parent to sync; then mkdir only creates them.
+	// mkdir makes the store and auxiliary directories durable: a store
+	// directory whose entry is lost in a crash loses the whole store. It
+	// works on the filesystem as given, not the wrapped one, to resolve
+	// paths on disk as the system does (fs.MkdirAllStoreDir). An in-memory
+	// filesystem has no current directory, so a relative path there has no
+	// parent to sync; then mkdir only creates them.
 	mkdir := func(dir string, perm os.FileMode) error {
-		return fs.MkdirAllStoreDir(opts.FS, dir, perm)
+		return fs.MkdirAllStoreDir(baseFS, dir, perm)
 	}
 	if !filepath.IsAbs(cfg.Dir) {
-		if _, err := opts.FS.Stat("."); oserror.IsNotExist(err) {
-			mkdir = opts.FS.MkdirAll
+		if _, err := baseFS.Stat("."); oserror.IsNotExist(err) {
+			mkdir = baseFS.MkdirAll
 		} else if err != nil {
 			return nil, err
 		}
