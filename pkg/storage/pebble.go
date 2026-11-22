@@ -1062,8 +1062,17 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (p *Pebble, err error) {
 			filesystemCloser.Close()
 		}
 	}()
+	// mkdir syncs the parents of the directories it creates: a store
+	// directory whose entry is lost in a crash loses the whole store. An
+	// in-memory engine has no directory of its own to make durable.
+	mkdir := opts.FS.MkdirAll
+	if cfg.Dir != "" {
+		mkdir = func(dir string, perm os.FileMode) error {
+			return fs.MkdirAllAndSyncParents(opts.FS, dir, perm)
+		}
+	}
 	if !opts.ReadOnly {
-		if err := opts.FS.MkdirAll(cfg.Dir, os.ModePerm); err != nil {
+		if err := mkdir(cfg.Dir, os.ModePerm); err != nil {
 			return nil, err
 		}
 	}
@@ -1134,7 +1143,7 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (p *Pebble, err error) {
 	}
 
 	auxDir := opts.FS.PathJoin(cfg.Dir, base.AuxiliaryDir)
-	if err := opts.FS.MkdirAll(auxDir, 0755); err != nil {
+	if err := mkdir(auxDir, 0755); err != nil {
 		return nil, err
 	}
 	ballastPath := base.EmergencyBallastFile(opts.FS.PathJoin, cfg.Dir)

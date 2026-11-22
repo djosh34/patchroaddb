@@ -39,6 +39,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/ts"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/cidr"
@@ -792,7 +793,7 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 			detail(redact.Sprintf("store %d: in-memory, size %s", i, humanizeutil.IBytes(sizeInBytes)))
 		} else {
 			location = storage.Filesystem(spec.Path)
-			if err := vfs.Default.MkdirAll(spec.Path, 0755); err != nil {
+			if err := fs.MkdirAllAndSyncParents(vfs.Default, spec.Path, 0755); err != nil {
 				return Engines{}, errors.Wrap(err, "creating store directory")
 			}
 			du, err := vfs.Default.GetDiskUsage(spec.Path)

@@ -1677,3 +1677,23 @@ func TestPebbleLoggingSlowReads(t *testing.T) {
 	}
 	require.Less(t, 0, slowCount)
 }
+
+// TestNewStoreSurvivesCrash checks that a new store is durable once Open
+// returns: a crash right after the first start must not lose the store
+// directory, whose entry in its parent was never synced before.
+func TestNewStoreSurvivesCrash(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	mem := vfs.NewStrictMem()
+	st := cluster.MakeTestingClusterSettings()
+	eng, err := Open(ctx, MakeLocation("/data", mem), st)
+	require.NoError(t, err)
+	eng.Close()
+
+	mem.ResetToSyncedState()
+	eng, err = Open(ctx, MakeLocation("/data", mem), st, MustExist)
+	require.NoError(t, err)
+	eng.Close()
+}
