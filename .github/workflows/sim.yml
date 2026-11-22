@@ -31,13 +31,6 @@ on:
       planted:
         description: "'all' checks the planted bugs instead of running a campaign"
         default: ""
-  # Temporary, for sim-dev.yml while outcome 10 is built.
-  workflow_call:
-    inputs:
-      seeds: {type: string, default: "100000"}
-      first: {type: string, default: "1"}
-      per-job: {type: string, default: "1000"}
-      planted: {type: string, default: ""}
 
 permissions:
   contents: read
