@@ -47,7 +47,7 @@ func TestMarkerSurvivesCrashDuringMove(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	mem := &crashOnMarkerRemoveFS{MemFS: vfs.NewStrictMem()}
-	fs := markerSyncFS{FS: mem}
+	fs := markerSyncFS{FS: mem, dir: "/"}
 	m, _, err := atomicfs.LocateMarker(fs, "/", "format-version")
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -60,4 +60,21 @@ func TestMarkerSurvivesCrashDuringMove(t *testing.T) {
 	value, err := atomicfs.ReadMarker(mem, "/", "format-version")
 	require.NoError(t, err)
 	require.Equal(t, "002", value)
+}
+
+// TestMarkerMoveInMemoryRoot checks that moving a marker in an in-memory
+// engine, whose directory is "", removes the old marker.
+func TestMarkerMoveInMemoryRoot(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	mem := vfs.NewMem()
+	m, _, err := atomicfs.LocateMarker(markerSyncFS{FS: mem, dir: ""}, "", "format-version")
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+	require.NoError(t, m.Move("001"))
+	require.NoError(t, m.Move("002"))
+
+	files, err := mem.List("")
+	require.NoError(t, err)
+	require.Equal(t, []string{"marker.format-version.000002.002"}, files)
 }

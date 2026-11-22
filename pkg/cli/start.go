@@ -225,8 +225,9 @@ func initTempStorageConfig(
 	if !useStore.InMemory {
 		dir := useStore.Path
 		// Create the store dir, if it doesn't exist. The dir is required to exist
-		// by diskPercentResolverFactory.
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		// by diskPercentResolverFactory. Sync the parents of what it creates:
+		// a store directory lost in a crash loses the whole store.
+		if err := fs.MkdirAllAndSyncParents(vfs.Default, dir, 0755); err != nil {
 			return base.TempStorageConfig{}, errors.Wrapf(err, "failed to create dir for first store: %s", dir)
 		}
 		var err error

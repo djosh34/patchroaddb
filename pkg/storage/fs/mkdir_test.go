@@ -169,3 +169,17 @@ func TestMkdirAllAndSyncParentsErrors(t *testing.T) {
 		}
 	})
 }
+
+// TestMkdirAllDurable checks that MkdirAllDurable makes a directory that
+// already exists, but whose entry was never synced, durable.
+func TestMkdirAllDurable(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	fs := vfs.NewStrictMem()
+	require.NoError(t, MkdirAllAndSyncParents(fs, "/a", os.ModePerm))
+	require.NoError(t, fs.MkdirAll("/a/b", os.ModePerm))
+	require.NoError(t, MkdirAllDurable(fs, "/a/b", os.ModePerm))
+	fs.ResetToSyncedState()
+	_, err := fs.Stat("/a/b")
+	require.NoError(t, err)
+}

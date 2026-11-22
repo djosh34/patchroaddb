@@ -17,8 +17,8 @@ import (
 	"github.com/cockroachdb/pebble/vfs"
 )
 
-// markerSyncFS syncs a directory before an atomic marker file is removed
-// from it.
+// markerSyncFS syncs the store directory before an atomic marker file is
+// removed from it.
 //
 // Pebble records which MANIFEST is current, and the store's format version,
 // in marker files (marker.<name>.<iteration>.<value>). To move a marker, it
@@ -29,14 +29,20 @@ import (
 // on "MANIFEST-000000"; without the manifest marker, the store looks empty,
 // and Pebble refuses it or creates a new store over the old files. Syncing
 // the directory first makes the new marker durable before the old one goes.
+//
+// Pebble keeps its markers in the store directory, dir. markerSyncFS syncs
+// that directory rather than one taken from the marker's path: for an
+// in-memory engine dir is "", and a bare marker name's directory, ".", does
+// not exist there.
 type markerSyncFS struct {
 	vfs.FS
+	dir string
 }
 
 // Remove implements vfs.FS.
 func (fs markerSyncFS) Remove(name string) error {
 	if strings.HasPrefix(fs.PathBase(name), "marker.") {
-		dir, err := fs.OpenDir(fs.PathDir(name))
+		dir, err := fs.OpenDir(fs.dir)
 		if err != nil {
 			return err
 		}

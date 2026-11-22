@@ -848,7 +848,7 @@ func wrapFilesystemMiddleware(opts *pebble.Options) (vfs.FS, io.Closer) {
 	fs = vfs.OnDiskFull(fs, func() {
 		exit.WithCode(exit.DiskFull())
 	})
-	return markerSyncFS{FS: fs}, closer
+	return fs, closer
 }
 
 // PebbleConfig holds all configuration parameters and knobs used in setting up
@@ -1057,21 +1057,21 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (p *Pebble, err error) {
 	// Wrap the FS with disk health-checking and ENOSPC-detection.
 	var filesystemCloser io.Closer
 	opts.FS, filesystemCloser = wrapFilesystemMiddleware(opts)
+	opts.FS = markerSyncFS{FS: opts.FS, dir: cfg.Dir}
 	defer func() {
 		if err != nil {
 			filesystemCloser.Close()
 		}
 	}()
-	// mkdir syncs the parents of the directories it creates: a store
-	// directory whose entry is lost in a crash loses the whole store. The
-	// server's store paths are absolute (cli.extraStoreFlagInit); a relative
-	// one is an in-memory engine of a test or tool, and an in-memory
-	// filesystem has no current directory to start from.
-	mkdir := opts.FS.MkdirAll
-	if filepath.IsAbs(cfg.Dir) {
-		mkdir = func(dir string, perm os.FileMode) error {
-			return fs.MkdirAllAndSyncParents(opts.FS, dir, perm)
-		}
+	// mkdir makes the store and auxiliary directories durable: a store
+	// directory whose entry is lost in a crash loses the whole store. An
+	// in-memory filesystem has no current directory, so a relative path
+	// there has no parent to sync; then mkdir only creates them.
+	mkdir := func(dir string, perm os.FileMode) error {
+		return fs.MkdirAllDurable(opts.FS, dir, perm)
+	}
+	if _, err := opts.FS.Stat("."); err != nil && !filepath.IsAbs(cfg.Dir) {
+		mkdir = opts.FS.MkdirAll
 	}
 	if !opts.ReadOnly {
 		if err := mkdir(cfg.Dir, os.ModePerm); err != nil {
