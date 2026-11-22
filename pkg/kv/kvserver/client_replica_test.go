@@ -1957,6 +1957,56 @@ func TestLeaseExpirationBelowFutureTimeRequest(t *testing.T) {
 	})
 }
 
+// TestTxnWriteTimestampInLeaseStasis tests a transactional request whose
+// read timestamp the lease covers but whose write timestamp falls in the
+// lease's stasis period. The lease must be extended for it. Before, the
+// replica checked the lease at the read timestamp, found it valid, and
+// retried the request at once, without end and without waiting.
+func TestTxnWriteTimestampInLeaseStasis(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	ctx := context.Background()
+	manualClock := hlc.NewHybridManualClock()
+	tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{
+		ReplicationMode: base.ReplicationManual,
+		ServerArgs: base.TestServerArgs{
+			Knobs: base.TestingKnobs{
+				// Only the request may extend the lease.
+				Store:  &kvserver.StoreTestingKnobs{DisableAutomaticLeaseRenewal: true},
+				Server: &server.TestingKnobs{WallClock: manualClock},
+			},
+		},
+	})
+	defer tc.Stopper().Stop(ctx)
+	key := tc.ScratchRangeWithExpirationLease(t)
+	store := tc.GetFirstStoreFromServer(t, 0)
+	repl := store.LookupReplica(roachpb.RKey(key))
+	_, pErr := kv.SendWrapped(ctx, store.TestSender(), getArgs(key))
+	require.NoError(t, pErr.GoError())
+	preLease, _ := repl.GetLease()
+
+	// Pause the clock just before the lease's stasis period.
+	clock := tc.Servers[0].Clock()
+	manualClock.Pause()
+	stasis := preLease.Expiration.WallTime - clock.MaxOffset().Nanoseconds()
+	manualClock.Increment(stasis - 10 - manualClock.UnixNano())
+	now := clock.Now()
+
+	// The read timestamp is now, the write timestamp in the stasis period.
+	// It is synthetic so that it does not move the clock.
+	txn := roachpb.MakeTransaction("test", key, isolation.Serializable, 1, now,
+		clock.MaxOffset().Nanoseconds(), int32(tc.Servers[0].SQLInstanceID()), 0, false /* omitInRangefeeds */)
+	txn.WriteTimestamp = now.Add(20, 0).WithSynthetic(true)
+
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, pErr = kv.SendWrappedWith(ctx, store.TestSender(), kvpb.Header{Txn: &txn}, getArgs(key))
+	require.NoError(t, pErr.GoError())
+
+	postLease, _ := repl.GetLease()
+	require.True(t, preLease.Expiration.Less(*postLease.Expiration), "expected extension")
+}
+
 // TestRangeLocalUncertaintyLimitAfterNewLease verifies that on lease
 // transfer, the normal limiting of a request's local uncertainty limit
 // to the first observed timestamp on a node is extended to include the

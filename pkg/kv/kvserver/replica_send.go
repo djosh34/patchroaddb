@@ -845,7 +845,13 @@ func (r *Replica) handleInvalidLeaseError(ctx context.Context, ba *kvpb.BatchReq
 	// On an invalid lease error, attempt to acquire a new lease. If in the
 	// process of doing so, we determine that the lease now lives elsewhere,
 	// redirect.
-	_, pErr := r.redirectOnOrAcquireLeaseForRequest(ctx, ba.Timestamp, r.signallerForBatch(ba))
+	//
+	// The lease is checked at the batch's write timestamp, as checkLeaseRLocked
+	// did when it returned the error. A transaction's write timestamp can be
+	// above its read timestamp and inside the lease's stasis period; checked at
+	// the read timestamp, the lease looks valid, nothing extends it, and the
+	// request would retry at once, forever.
+	_, pErr := r.redirectOnOrAcquireLeaseForRequest(ctx, ba.WriteTimestamp(), r.signallerForBatch(ba))
 	// If we managed to get a lease (i.e. pErr == nil), the request evaluation
 	// will be retried.
 	return pErr
