@@ -193,7 +193,9 @@ jobs:
       matrix:
         # The bugs of pkg/util/planted, with each bug's seed budget.
         include:
-          - {bug: lost-sync, budget: 30}
+          # Power losses show this bug, and also the bugs of #59 that
+          # fail a seed first: it takes more seeds.
+          - {bug: lost-sync, budget: 60}
           - {bug: skip-refresh, budget: 30}
           - {bug: wrong-filter, budget: 30}
           - {bug: internal-error, budget: 30}

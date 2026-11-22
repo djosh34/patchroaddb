@@ -137,12 +137,12 @@ func (c *cluster) nodeMain(nd *node, args []string) func() {
 			return
 		}
 		log.SetExitFunc(false /* hideStack */, func(code exit.Code) {
-			c.exited(nd, fmt.Sprintf("log.Fatal, exit code %s", code))
+			c.exited(nd, fmt.Sprintf("log.Fatal, exit code %d", code))
 			exit.WithCode(code)
 		})
 		os.Args = append([]string{"patchroaddb"}, args...)
 		code := cli.MainCode()
-		c.exited(nd, fmt.Sprintf("exit code %s", code))
+		c.exited(nd, fmt.Sprintf("exit code %d", code))
 	}
 }
 

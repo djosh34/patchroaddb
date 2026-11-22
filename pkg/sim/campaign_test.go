@@ -308,21 +308,29 @@ func TestReplay(t *testing.T) {
 	}
 }
 
-// plantedChecks is, for each planted bug, the start of the failure that
-// the check meant for it reports. A seed catches the bug only with that
-// failure: another failure, such as a node that loses its store, shows
-// nothing about the bug.
-var plantedChecks = map[string]string{
-	planted.LostSync:      "ledger key ",
-	planted.SkipRefresh:   "the accounts hold ",
-	planted.WrongFilter:   "results differ at ",
-	planted.InternalError: "internal error: ",
-	planted.LostSegment:   "table ",
+// plantedChecks is, for each planted bug, whether a failure is one of the
+// check meant for it. A seed catches the bug only with such a failure:
+// another, such as a node that loses its store, shows nothing about the
+// bug.
+var plantedChecks = map[string]func(msg string) bool{
+	// Lost Raft log entries show as a lost acknowledged write, or as a
+	// node's own assertion failing on its log: a log.Fatal.
+	planted.LostSync: func(msg string) bool {
+		return strings.HasPrefix(msg, "ledger key ") || strings.Contains(msg, "stopped on its own: log.Fatal")
+	},
+	planted.SkipRefresh:   prefix("the accounts hold "),
+	planted.WrongFilter:   prefix("results differ at "),
+	planted.InternalError: prefix("internal error: "),
+	planted.LostSegment:   prefix("table "),
+}
+
+func prefix(p string) func(string) bool {
+	return func(msg string) bool { return strings.HasPrefix(msg, p) }
 }
 
 // TestPlanted runs seeds from SIM_FIRST with the planted bug
 // PATCHROADDB_PLANTED on, at most SIM_COUNT of them, until one fails with
-// the failure of the check meant for the bug (plantedChecks) while the
+// a failure of the check meant for the bug (plantedChecks) while the
 // same seed passes without the bug: then the bug counts as caught.
 func TestPlanted(t *testing.T) {
 	bin := simEnv("SIM_BINARY")
@@ -344,10 +352,10 @@ func TestPlanted(t *testing.T) {
 			continue
 		}
 		if !failedWith(o.log, check) {
-			t.Logf("%s: seed %d failed, but not with %q: %s", bug, seed, check, o.reason)
+			t.Logf("%s: seed %d failed, but not in the bug's check: %s", bug, seed, o.reason)
 			continue
 		}
-		t.Logf("%s: seed %d failed with %q", bug, seed, check)
+		t.Logf("%s: seed %d failed in the bug's check", bug, seed)
 		// A seed that fails without the bug too shows nothing about the
 		// bug; a campaign reports it. The next seed may.
 		// Its logs go apart, not over those of the run with the bug.
@@ -367,14 +375,14 @@ func TestPlanted(t *testing.T) {
 }
 
 // failedWith reports whether a run's log has a test failure whose message
-// starts with prefix.
-func failedWith(log []byte, prefix string) bool {
+// check accepts.
+func failedWith(log []byte, check func(string) bool) bool {
 	for _, line := range bytes.Split(log, []byte("\n")) {
 		var m struct {
 			Msg    string `json:"msg"`
 			Method string `json:"method"`
 		}
-		if json.Unmarshal(line, &m) == nil && m.Method == "t.Error" && strings.HasPrefix(m.Msg, prefix) {
+		if json.Unmarshal(line, &m) == nil && m.Method == "t.Error" && check(m.Msg) {
 			return true
 		}
 	}
@@ -414,7 +422,11 @@ func TestFailedWith(t *testing.T) {
 	if failedWith(log, plantedChecks[planted.LostSync]) {
 		t.Error("a ledger failure is found where there is none")
 	}
-	if failedWith(log, "seed summary") {
+	if failedWith(log, prefix("seed summary")) {
 		t.Error("a log line counts as a failure")
+	}
+	fatal := []byte(`{"msg":"n2 stopped on its own: log.Fatal, exit code 7","method":"t.Error"}`)
+	if !failedWith(fatal, plantedChecks[planted.LostSync]) || failedWith(fatal, plantedChecks[planted.WrongFilter]) {
+		t.Error("a log.Fatal is not lost-sync's alone")
 	}
 }
