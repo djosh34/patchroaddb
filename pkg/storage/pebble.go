@@ -1030,13 +1030,6 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (p *Pebble, err error) {
 	if cfg.Settings == nil {
 		return nil, errors.AssertionFailedf("NewPebble requires cfg.Settings to be set")
 	}
-	// Pebble names the store's files by joining them to its directory, which
-	// cleans the path. Every other use of the directory takes the cleaned
-	// path too, so that all of them, also those the system resolves, such as
-	// directory syncs and disk usage, name the same directory.
-	if cfg.Dir != "" {
-		cfg.Dir = filepath.Clean(cfg.Dir)
-	}
 
 	var opts *pebble.Options
 	if cfg.Opts == nil {
@@ -1065,6 +1058,23 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (p *Pebble, err error) {
 	var filesystemCloser io.Closer
 	// Whether the store is on disk, told before the wrappers hide it.
 	onDisk := fs.OnDisk(opts.FS)
+	// Pebble names the store's files by joining them to its directory, which
+	// cleans the path. Every other use of the directory takes that path too,
+	// so that all of them, also those the system resolves, such as directory
+	// syncs and disk usage, name the same directory. On disk the path is
+	// also made absolute, as the CLI makes store paths, so that a relative
+	// path means one directory however the working directory is reached. In
+	// memory, "." is the root, "", where Pebble's joined names go.
+	if cfg.Dir != "" {
+		cfg.Dir = filepath.Clean(cfg.Dir)
+		if onDisk {
+			if cfg.Dir, err = filepath.Abs(cfg.Dir); err != nil {
+				return nil, err
+			}
+		} else if cfg.Dir == "." {
+			cfg.Dir = ""
+		}
+	}
 	opts.FS, filesystemCloser = wrapFilesystemMiddleware(opts)
 	opts.FS = markerSyncFS{FS: opts.FS, dir: cfg.Dir}
 	defer func() {

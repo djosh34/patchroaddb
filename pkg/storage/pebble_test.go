@@ -1744,6 +1744,27 @@ func TestOpenCreatesTheStoreItUses(t *testing.T) {
 	t.Run("memory-relative", func(t *testing.T) {
 		checkReopen(t, MakeLocation("a/./db", vfs.NewMem()))
 	})
+	// Paths that clean to ".": the in-memory root.
+	for _, dir := range []string{".", "a/.."} {
+		t.Run("memory-"+dir, func(t *testing.T) {
+			checkReopen(t, MakeLocation(dir, vfs.NewStrictMem()))
+		})
+	}
+	// A relative path from a working directory reached through a link,
+	// as a shell gives it in PWD: ".." is the parent of the link, as
+	// filepath.Abs, and the CLI, take it.
+	t.Run("disk-relative-through-link", func(t *testing.T) {
+		tmp, err := filepath.EvalSymlinks(t.TempDir())
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(filepath.Join(tmp, "real", "sub"), 0755))
+		alias := filepath.Join(tmp, "alias")
+		require.NoError(t, os.Symlink(filepath.Join(tmp, "real", "sub"), alias))
+		t.Chdir(alias)
+		t.Setenv("PWD", alias)
+		checkReopen(t, Filesystem("../store"))
+		_, err = os.Stat(filepath.Join(tmp, "store", MinVersionFilename))
+		require.NoError(t, err)
+	})
 }
 
 // openDirTracer records the directories opened through it, which are the
@@ -1769,12 +1790,12 @@ func TestOpenSyncsLinkDirs(t *testing.T) {
 
 	tmp, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
-	// links/first -> ../middle/second, middle/second -> ../disk/sub.
-	for _, dir := range []string{"links", "middle", "disk/sub"} {
+	// links/first -> ../middle/second, middle/second -> ../bridge/step/../../disk/sub.
+	for _, dir := range []string{"links", "middle", "bridge/step", "disk/sub"} {
 		require.NoError(t, os.MkdirAll(filepath.Join(tmp, dir), 0755))
 	}
 	require.NoError(t, os.Symlink("../middle/second", filepath.Join(tmp, "links", "first")))
-	require.NoError(t, os.Symlink("../disk/sub", filepath.Join(tmp, "middle", "second")))
+	require.NoError(t, os.Symlink("../bridge/step/../../disk/sub", filepath.Join(tmp, "middle", "second")))
 
 	tracer := &openDirTracer{FS: vfs.Default}
 	eng, err := Open(context.Background(), MakeLocation(filepath.Join(tmp, "links", "first", "store"), tracer),
@@ -1784,6 +1805,7 @@ func TestOpenSyncsLinkDirs(t *testing.T) {
 	for _, want := range []string{
 		filepath.Join(tmp, "links"),       // holds first
 		filepath.Join(tmp, "middle"),      // holds second
+		filepath.Join(tmp, "bridge"),      // holds step, which second's target passes
 		filepath.Join(tmp, "disk", "sub"), // holds store, on disk
 		filepath.Join(tmp, "disk"),        // holds sub
 	} {

@@ -235,38 +235,49 @@ func TestMkdirAllStoreDirCleansPath(t *testing.T) {
 }
 
 // TestDirsToSync checks which directories MkdirAllStoreDir syncs on disk:
-// the parents along the path made absolute, along it with its links
-// resolved, and the directories that hold the links on the way.
+// every directory in which resolving the path looks up a name, through
+// links, and through ".." in a link's target.
 func TestDirsToSync(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	tmp, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
-	// links/first -> ../middle/second, middle/second -> ../disk/sub.
-	for _, dir := range []string{"links", "middle", "disk/sub/store"} {
+	// links/first -> ../middle/second, middle/second -> ../disk/sub,
+	// links/by-name -> ../bridge/step/../../disk/sub.
+	for _, dir := range []string{"links", "middle", "bridge/step", "disk/sub/store"} {
 		require.NoError(t, os.MkdirAll(filepath.Join(tmp, dir), 0755))
 	}
 	require.NoError(t, os.Symlink("../middle/second", filepath.Join(tmp, "links", "first")))
 	require.NoError(t, os.Symlink("../disk/sub", filepath.Join(tmp, "middle", "second")))
+	require.NoError(t, os.Symlink("../bridge/step/../../disk/sub", filepath.Join(tmp, "links", "by-name")))
 
-	dirs, err := dirsToSync(vfs.Default, filepath.Join(tmp, "links", "first", "store"), true /* onDisk */)
-	require.NoError(t, err)
-	for _, want := range []string{
-		filepath.Join(tmp, "links", "first"), // the entry of store, through the links
-		filepath.Join(tmp, "links"),          // the entry of first
-		filepath.Join(tmp, "middle"),         // the entry of second
-		filepath.Join(tmp, "disk", "sub"),    // the entry of store on disk
-		filepath.Join(tmp, "disk"),           // the entry of sub
-		tmp, "/",
+	for path, want := range map[string][]string{
+		filepath.Join(tmp, "links", "first", "store"): {
+			filepath.Join(tmp, "links"),       // holds first
+			filepath.Join(tmp, "middle"),      // holds second
+			filepath.Join(tmp, "disk", "sub"), // holds store
+			filepath.Join(tmp, "disk"),        // holds sub
+			tmp, "/",
+		},
+		filepath.Join(tmp, "links", "by-name", "store"): {
+			filepath.Join(tmp, "links"),  // holds by-name
+			filepath.Join(tmp, "bridge"), // holds step, which the link's target passes
+			filepath.Join(tmp, "disk", "sub"),
+			filepath.Join(tmp, "disk"),
+		},
 	} {
-		require.Contains(t, dirs, want)
+		dirs, err := dirsToSync(vfs.Default, path, true /* onDisk */)
+		require.NoError(t, err)
+		for _, dir := range want {
+			require.Contains(t, dirs, dir, path)
+		}
 	}
 
 	// A relative path is made absolute: the parents of the current
 	// directory are synced too.
 	wd, err := os.Getwd()
 	require.NoError(t, err)
-	dirs, err = dirsToSync(vfs.Default, ".", true /* onDisk */)
+	dirs, err := dirsToSync(vfs.Default, ".", true /* onDisk */)
 	require.NoError(t, err)
 	require.Contains(t, dirs, filepath.Dir(wd))
 }

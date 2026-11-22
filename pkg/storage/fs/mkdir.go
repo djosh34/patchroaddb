@@ -84,8 +84,8 @@ func MkdirAllAndSyncParents(fs vfs.FS, path string, perm os.FileMode) error {
 // It creates the cleaned path: Pebble names a store's files by joining its
 // directory with their names, which cleans it, so that is the directory
 // the store's files go to. With onDisk, fs is the system's filesystem, or
-// wraps it: then the parents synced also include those along the path
-// made absolute and with its symbolic links resolved (dirsToSync).
+// wraps it: then the directories synced are those the system looks names
+// up in to resolve the path, through its symbolic links (dirsToSync).
 func MkdirAllStoreDir(fs vfs.FS, path string, perm os.FileMode, onDisk bool) error {
 	path = filepath.Clean(path)
 	if err := fs.MkdirAll(path, perm); err != nil {
@@ -112,55 +112,37 @@ func OnDisk(fs vfs.FS) bool {
 	return vfs.Root(fs) == vfs.Default
 }
 
-// dirsToSync returns the directories whose entries make path durable: the
-// parent of path and of each of its ancestors, up to the root. On disk, a
-// relative path is first made absolute, and the directories along the path
-// with its symbolic links resolved are added, as are the directories that
-// hold the links on the way: a link's entry is in the directory that holds
-// it. An in-memory filesystem has no links.
+// dirsToSync returns the directories whose entries make path durable. In
+// memory, which has no links, these are the parent of path and of each of
+// its ancestors, up to the root. On disk, they are the directories in which
+// resolving path looks up a name, as the system resolves it, through every
+// symbolic link and "..": losing any of those entries loses the path. A
+// relative path is first made absolute.
 func dirsToSync(fs vfs.FS, path string, onDisk bool) ([]string, error) {
-	var dirs []string
-	seen := make(map[string]bool)
-	// add adds dir and each of its ancestors.
-	add := func(dir string) {
-		for {
-			if !seen[dir] {
-				seen[dir] = true
-				dirs = append(dirs, dir)
-			}
+	if !onDisk {
+		var dirs []string
+		for dir := path; ; {
 			parent := fs.PathDir(dir)
 			if parent == dir {
-				return
+				return dirs, nil
 			}
+			dirs = append(dirs, parent)
 			dir = parent
 		}
-	}
-	if !onDisk {
-		if parent := fs.PathDir(path); parent != path {
-			add(parent)
-		}
-		return dirs, nil
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, errors.Wrapf(err, "making %s absolute", path)
 	}
-	add(filepath.Dir(abs))
-	resolved, linkDirs, err := resolveLinks(abs)
-	if err != nil {
-		return nil, errors.Wrapf(err, "resolving %s", abs)
-	}
-	add(filepath.Dir(resolved))
-	for _, dir := range linkDirs {
-		add(dir)
-	}
-	return dirs, nil
+	dirs, err := lookupDirs(abs)
+	return dirs, errors.Wrapf(err, "resolving %s", abs)
 }
 
-// resolveLinks resolves the symbolic links in the absolute path abs as the
-// system does, one component at a time, and also returns the directories
-// that hold the links it passes.
-func resolveLinks(abs string) (resolved string, linkDirs []string, _ error) {
+// lookupDirs resolves the absolute path abs as the system does, one name at
+// a time, and returns each directory in which it looks up a name, once.
+func lookupDirs(abs string) ([]string, error) {
+	var dirs []string
+	seen := make(map[string]bool)
 	rest := strings.Split(abs, "/")
 	dir := "/"
 	for links := 0; len(rest) > 0; {
@@ -173,29 +155,32 @@ func resolveLinks(abs string) (resolved string, linkDirs []string, _ error) {
 			dir = filepath.Dir(dir)
 			continue
 		}
+		if !seen[dir] {
+			seen[dir] = true
+			dirs = append(dirs, dir)
+		}
 		next := filepath.Join(dir, name)
 		info, err := os.Lstat(next)
 		if err != nil {
-			return "", nil, err
+			return nil, err
 		}
 		if info.Mode()&os.ModeSymlink == 0 {
 			dir = next
 			continue
 		}
 		if links++; links > 255 {
-			return "", nil, errors.Newf("too many symbolic links in %s", abs)
+			return nil, errors.Newf("too many symbolic links in %s", abs)
 		}
 		target, err := os.Readlink(next)
 		if err != nil {
-			return "", nil, err
+			return nil, err
 		}
-		linkDirs = append(linkDirs, dir)
 		if filepath.IsAbs(target) {
 			dir = "/"
 		}
 		rest = append(strings.Split(target, "/"), rest...)
 	}
-	return dir, linkDirs, nil
+	return dirs, nil
 }
 
 // syncDir syncs the directory dir.
