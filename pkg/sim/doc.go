@@ -30,8 +30,8 @@
 //     A node that returns from its command or calls log.Fatal is seen as
 //     such even while its fsyncs may crash it (cluster.go). One blind spot
 //     is left: gosim does not tell why a machine stopped, so a node that
-//     calls os.Exit directly while crashes in fsync are on looks like one
-//     of those crashes, and is restarted;
+//     ends its process itself in another way while crashes in fsync are on
+//     looks like one of those crashes, and is restarted;
 //   - every acknowledged write to the ledger table survives the crashes;
 //   - transfers between accounts keep the total, which holds only if the
 //     transactions are serializable;
