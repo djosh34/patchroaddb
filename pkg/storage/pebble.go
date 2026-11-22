@@ -1063,10 +1063,12 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (p *Pebble, err error) {
 		}
 	}()
 	// mkdir syncs the parents of the directories it creates: a store
-	// directory whose entry is lost in a crash loses the whole store. An
-	// in-memory engine has no directory of its own to make durable.
+	// directory whose entry is lost in a crash loses the whole store. The
+	// server's store paths are absolute (cli.extraStoreFlagInit); a relative
+	// one is an in-memory engine of a test or tool, and an in-memory
+	// filesystem has no current directory to start from.
 	mkdir := opts.FS.MkdirAll
-	if cfg.Dir != "" {
+	if filepath.IsAbs(cfg.Dir) {
 		mkdir = func(dir string, perm os.FileMode) error {
 			return fs.MkdirAllAndSyncParents(opts.FS, dir, perm)
 		}
