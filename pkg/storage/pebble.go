@@ -1062,16 +1062,17 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (p *Pebble, err error) {
 	// cleans the path. Every other use of the directory takes that path too,
 	// so that all of them, also those the system resolves, such as directory
 	// syncs and disk usage, name the same directory. On disk the path is
-	// also made absolute, as the CLI makes store paths, so that a relative
-	// path means one directory however the working directory is reached. In
-	// memory, "." is the root, "", where Pebble's joined names go.
+	// also made absolute against the working directory as the system has it
+	// (fs.AbsPath), so that a relative path names the directory the system
+	// resolves it to. On an in-memory filesystem, "." is the root, "", where
+	// Pebble's joined names go.
 	if cfg.Dir != "" {
 		cfg.Dir = filepath.Clean(cfg.Dir)
 		if onDisk {
-			if cfg.Dir, err = filepath.Abs(cfg.Dir); err != nil {
+			if cfg.Dir, err = fs.AbsPath(cfg.Dir); err != nil {
 				return nil, err
 			}
-		} else if cfg.Dir == "." {
+		} else if _, inMem := vfs.Root(opts.FS).(*vfs.MemFS); inMem && cfg.Dir == "." {
 			cfg.Dir = ""
 		}
 	}

@@ -1750,9 +1750,9 @@ func TestOpenCreatesTheStoreItUses(t *testing.T) {
 			checkReopen(t, MakeLocation(dir, vfs.NewStrictMem()))
 		})
 	}
-	// A relative path from a working directory reached through a link,
-	// as a shell gives it in PWD: ".." is the parent of the link, as
-	// filepath.Abs, and the CLI, take it.
+	// A relative path from a working directory reached through a link, as
+	// a shell gives it in PWD: ".." is the parent of the directory the
+	// system is in, as for the system itself, whatever PWD says.
 	t.Run("disk-relative-through-link", func(t *testing.T) {
 		tmp, err := filepath.EvalSymlinks(t.TempDir())
 		require.NoError(t, err)
@@ -1762,8 +1762,18 @@ func TestOpenCreatesTheStoreItUses(t *testing.T) {
 		t.Chdir(alias)
 		t.Setenv("PWD", alias)
 		checkReopen(t, Filesystem("../store"))
-		_, err = os.Stat(filepath.Join(tmp, "store", MinVersionFilename))
+		_, err = os.Stat(filepath.Join(tmp, "real", "store", MinVersionFilename))
 		require.NoError(t, err)
+		_, err = os.Stat(filepath.Join(tmp, "store"))
+		require.True(t, oserror.IsNotExist(err), "%v", err)
+	})
+	// "." on disk, through a wrapper vfs.Root does not see through, is the
+	// working directory, not the in-memory root.
+	t.Run("disk-dot-wrapped", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		fs, closer := vfs.WithDiskHealthChecks(vfs.Default, time.Second, func(vfs.DiskSlowInfo) {})
+		defer closer.Close()
+		checkReopen(t, MakeLocation(".", fs))
 	})
 }
 

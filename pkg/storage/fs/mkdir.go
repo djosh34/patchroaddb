@@ -130,12 +130,31 @@ func dirsToSync(fs vfs.FS, path string, onDisk bool) ([]string, error) {
 			dir = parent
 		}
 	}
-	abs, err := filepath.Abs(path)
+	abs, err := AbsPath(path)
 	if err != nil {
-		return nil, errors.Wrapf(err, "making %s absolute", path)
+		return nil, err
 	}
 	dirs, err := lookupDirs(abs)
 	return dirs, errors.Wrapf(err, "resolving %s", abs)
+}
+
+// AbsPath makes path absolute against the working directory as the system
+// has it, with its links resolved. filepath.Abs takes the working directory
+// from PWD, which a shell keeps as the path it was reached by: for a path
+// that starts with "..", that can be another directory than the one the
+// system resolves the relative path to.
+func AbsPath(path string) (string, error) {
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path), nil
+	}
+	wd, err := os.Getwd()
+	if err == nil {
+		wd, err = filepath.EvalSymlinks(wd)
+	}
+	if err != nil {
+		return "", errors.Wrapf(err, "making %s absolute", path)
+	}
+	return filepath.Join(wd, path), nil
 }
 
 // lookupDirs resolves the absolute path abs as the system does, one name at
