@@ -223,7 +223,7 @@ func (s *scenario) setup(ctx context.Context) error {
 	}
 	// The PITR check restores to a time during the workload, which needs a
 	// full backup that ends before it.
-	return s.waitFullBackup(ctx, conn)
+	return s.waitFullBackup(ctx)
 }
 
 // openArchive opens the cluster's backup repository in the fake S3.
@@ -233,25 +233,19 @@ func (s *scenario) openArchive(ctx context.Context) (*backup.Store, error) {
 	})
 }
 
-// waitFullBackup waits until a full backup ends before now. The cluster
-// takes its first full backup when it starts.
-func (s *scenario) waitFullBackup(ctx context.Context, conn *pgx.Conn) error {
-	var ts string
-	if err := conn.QueryRow(ctx, "SELECT cluster_logical_timestamp()::STRING").Scan(&ts); err != nil {
-		return err
-	}
-	now, err := hlc.ParseHLC(ts)
-	if err != nil {
-		return err
-	}
+// waitFullBackup waits until the archive has a full backup: the cluster
+// takes its first when it starts. A time after this, during the workload,
+// can then be restored to.
+func (s *scenario) waitFullBackup(ctx context.Context) error {
 	store, err := s.openArchive(ctx)
 	if err != nil {
 		return err
 	}
 	deadline := timeutil.Now().Add(2 * time.Minute)
 	for {
-		_, err := backup.CheckTarget(ctx, store, now)
-		if err == nil || !strings.Contains(err.Error(), "no full backup ends at or before") {
+		// The empty target asks for the latest restorable time.
+		_, err := backup.CheckTarget(ctx, store, hlc.Timestamp{})
+		if err == nil {
 			return nil
 		}
 		if timeutil.Now().After(deadline) {

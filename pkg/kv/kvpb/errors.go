@@ -61,6 +61,13 @@ func (e *UnhandledRetryableError) Error() string {
 var _ error = &UnhandledRetryableError{}
 
 func (e *UnhandledRetryableError) SafeFormatError(p errors.Printer) (next error) {
+	if e.PErr.EncodedError.IsSet() {
+		// Error's formatting methods are on the pointer. The value prints
+		// as its fields, among them EncodedError's pointer: a heap address,
+		// which differs from run to run.
+		p.Print(&e.PErr)
+		return nil
+	}
 	p.Print(e.PErr)
 	return nil
 }

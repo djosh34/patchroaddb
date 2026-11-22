@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -43,6 +42,7 @@ type seedOutcome struct {
 	wall       time.Duration
 	checksum   []byte
 	log        []byte
+	artifacts  map[string][]byte
 }
 
 // runSeed runs TestSeed with the seed in a gosim run, ended after wall of
@@ -75,6 +75,7 @@ func runSeed(
 	if res != nil {
 		o.checksum = res.Checksum
 		o.log = res.LogOutput
+		o.artifacts = res.Artifacts
 		if v, err := strconv.ParseFloat(string(res.Artifacts["cpu-seconds"]), 64); err == nil {
 			o.cpuSeconds = v
 		}
@@ -92,24 +93,6 @@ func runSeed(
 		}
 	}
 	return o
-}
-
-// structPointer is a pointer printed as a struct field, `{0x3202721a2ed8}`.
-// patchroaddb's UnhandledRetryableError prints its kvpb.Error by value,
-// whose fields hold one; the address depends on where the heap put it.
-var structPointer = regexp.MustCompile(`\{0x[0-9a-f]+\}`)
-
-// sameRun reports whether two runs of a seed, by their checksums and logs,
-// are the same run. gosim's checksum covers what the run logs, so a printed
-// pointer makes two equal runs differ. Their logs then differ in that
-// pointer only: every line has its machine, goroutine, simulated time and
-// gosim's step count, which differ too if the runs went apart.
-func sameRun(checksumA, logA, checksumB, logB []byte) bool {
-	if bytes.Equal(checksumA, checksumB) {
-		return true
-	}
-	mask := []byte("{0x}")
-	return bytes.Equal(structPointer.ReplaceAll(logA, mask), structPointer.ReplaceAll(logB, mask))
 }
 
 // saveSeed makes out/seed-<seed>/ for a failing seed, with its error and
@@ -227,19 +210,23 @@ func TestCampaign(t *testing.T) {
 		s.CPUSeconds += o.cpuSeconds
 		s.WallSecs += o.wall.Seconds()
 		if !o.failed && seed%100 == 0 {
-			// A second run that fails saves its log, as any failing run.
-			again := runSeed(t, bin, seed, planted, wall, out)
+			again := runSeed(t, bin, seed, planted, wall, "")
 			s.Replayed++
 			switch {
 			case again.failed:
 				o.failed, o.reason = true, fmt.Sprintf("the seed passed, then failed when run again: %s", again.reason)
-			case !sameRun(o.checksum, o.log, again.checksum, again.log):
+			case !bytes.Equal(o.checksum, again.checksum):
 				o.failed, o.reason = true, "the seed's second run differs from its first"
-				if out != "" {
-					// Both runs passed, so neither saved its log.
-					write := saveSeed(t, out, seed, planted, o.reason)
-					write("log.txt", readableLog(o.log))
-					write("log-2.txt", readableLog(again.log))
+			}
+			if o.failed && out != "" {
+				// The first run passed, so neither run saved its logs.
+				write := saveSeed(t, out, seed, planted, o.reason)
+				for name, run := range map[string]seedOutcome{"log": o, "log-2": again} {
+					write(name+".jsonl", run.log)
+					write(name+".txt", readableLog(run.log))
+					for artifact, data := range run.artifacts {
+						write(name+"-"+filepath.Base(artifact), data)
+					}
 				}
 			}
 		}
@@ -298,7 +285,7 @@ func TestReplay(t *testing.T) {
 	write("log.txt", first)
 	t.Logf("seed %d: failed %v %s", seed, first.Failed, first.Err)
 	second := run()
-	if !sameRun(first.Checksum, first.LogOutput, second.Checksum, second.LogOutput) || first.Failed != second.Failed {
+	if !bytes.Equal(first.Checksum, second.Checksum) || first.Failed != second.Failed {
 		write("log-2.txt", second)
 		t.Errorf("seed %d: the second run differs from the first: checksum %x, failed %v, against %x, failed %v",
 			seed, first.Checksum, first.Failed, second.Checksum, second.Failed)
@@ -308,24 +295,30 @@ func TestReplay(t *testing.T) {
 	}
 }
 
-// plantedChecks is, for each planted bug, whether a failure is one of the
-// check meant for it. A seed catches the bug only with such a failure:
-// another, such as a node that loses its store, shows nothing about the
-// bug.
-var plantedChecks = map[string]func(msg string) bool{
+// plantedChecks is, for each planted bug, whether a failing run's log
+// shows a failure of the check meant for it. A seed catches the bug only
+// with such a failure: another, such as a node that loses its store, shows
+// nothing about the bug.
+var plantedChecks = map[string]func(log []byte) bool{
 	// Lost Raft log entries show as a lost acknowledged write, or as a
-	// node's own assertion failing on its log: a log.Fatal.
-	planted.LostSync: func(msg string) bool {
-		return strings.HasPrefix(msg, "ledger key ") || strings.Contains(msg, "stopped on its own: log.Fatal")
+	// node's log.Fatal on Raft's own check of its log.
+	planted.LostSync: func(log []byte) bool {
+		return failedWith(log, prefix("ledger key ")) ||
+			(failedWith(log, contains("stopped on its own: log.Fatal")) &&
+				bytes.Contains(log, []byte("is out of range [lastIndex(")))
 	},
-	planted.SkipRefresh:   prefix("the accounts hold "),
-	planted.WrongFilter:   prefix("results differ at "),
-	planted.InternalError: prefix("internal error: "),
-	planted.LostSegment:   prefix("table "),
+	planted.SkipRefresh:   func(log []byte) bool { return failedWith(log, prefix("the accounts hold ")) },
+	planted.WrongFilter:   func(log []byte) bool { return failedWith(log, prefix("results differ at ")) },
+	planted.InternalError: func(log []byte) bool { return failedWith(log, prefix("internal error: ")) },
+	planted.LostSegment:   func(log []byte) bool { return failedWith(log, prefix("table ")) },
 }
 
 func prefix(p string) func(string) bool {
 	return func(msg string) bool { return strings.HasPrefix(msg, p) }
+}
+
+func contains(p string) func(string) bool {
+	return func(msg string) bool { return strings.Contains(msg, p) }
 }
 
 // TestPlanted runs seeds from SIM_FIRST with the planted bug
@@ -351,7 +344,7 @@ func TestPlanted(t *testing.T) {
 			t.Logf("%s: seed %d passed", bug, seed)
 			continue
 		}
-		if !failedWith(o.log, check) {
+		if !check(o.log) {
 			t.Logf("%s: seed %d failed, but not in the bug's check: %s", bug, seed, o.reason)
 			continue
 		}
@@ -389,44 +382,25 @@ func failedWith(log []byte, check func(string) bool) bool {
 	return false
 }
 
-func TestSameRun(t *testing.T) {
-	// The line that differed between two runs of seed 900.
-	line := func(addr string) []byte {
-		return []byte(`{"step":1813,"machine":"n1","msg":"failed to push during intent resolution: {<nil> 0 {` + addr + `} index:0"}` + "\n")
-	}
-	a, b := line("0x3202721a2ed8"), line("0x32025cd763c8")
-	if !sameRun([]byte{1}, a, []byte{2}, b) {
-		t.Error("logs that differ in an address are not the same run")
-	}
-	other := []byte(`{"step":1814,"machine":"n1","msg":"failed to push during intent resolution: {<nil> 0 {0x32025cd763c8} index:0"}` + "\n")
-	// Hex values other than a struct's pointer count.
-	txn := func(id string) []byte { return []byte(`{"step":1,"msg":"txn ` + id + `"}` + "\n") }
-	if sameRun([]byte{1}, txn("0x3202721a2ed8"), []byte{2}, txn("0x32025cd763c8")) {
-		t.Error("logs that differ in a hex value outside a struct are the same run")
-	}
-	if sameRun([]byte{1}, a, []byte{2}, other) {
-		t.Error("logs that differ in a step are the same run")
-	}
-	if !sameRun([]byte{1}, a, []byte{1}, other) {
-		t.Error("runs with one checksum are not the same run")
-	}
-}
-
-func TestFailedWith(t *testing.T) {
+func TestPlantedChecks(t *testing.T) {
 	log := []byte(`{"msg":"seed summary","method":"t.Logf"}
 {"msg":"results differ at 1579097408.960236209,12:","method":"t.Error","goroutine":16}
 `)
-	if !failedWith(log, plantedChecks[planted.WrongFilter]) {
+	if !plantedChecks[planted.WrongFilter](log) {
 		t.Error("the wrong-filter failure is not found")
 	}
-	if failedWith(log, plantedChecks[planted.LostSync]) {
+	if plantedChecks[planted.LostSync](log) {
 		t.Error("a ledger failure is found where there is none")
 	}
 	if failedWith(log, prefix("seed summary")) {
 		t.Error("a log line counts as a failure")
 	}
-	fatal := []byte(`{"msg":"n2 stopped on its own: log.Fatal, exit code 7","method":"t.Error"}`)
-	if !failedWith(fatal, plantedChecks[planted.LostSync]) || failedWith(fatal, plantedChecks[planted.WrongFilter]) {
-		t.Error("a log.Fatal is not lost-sync's alone")
+	fatal := []byte(`{"msg":"n2 stopped on its own: log.Fatal, exit code 7","method":"t.Error"}` + "\n")
+	raft := []byte(`{"msg":"F200115 ... tocommit(627) is out of range [lastIndex(535)]. Was the raft log corrupted, truncated, or lost?","machine":"n2"}` + "\n")
+	if plantedChecks[planted.LostSync](fatal) {
+		t.Error("a log.Fatal for another reason counts for lost-sync")
+	}
+	if !plantedChecks[planted.LostSync](append(raft, fatal...)) {
+		t.Error("a log.Fatal on a Raft log out of range does not count for lost-sync")
 	}
 }
