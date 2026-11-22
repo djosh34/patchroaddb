@@ -42,11 +42,6 @@ jobs:
         with:
           path: .gosim/cache.sqlite3
           key: sim-gosim-${{ github.sha }}
-      - name: List the unimplemented hooks the binary reaches
-        continue-on-error: true
-        run: .gosim/bin/gosim build-tests -tags noasm,disableunsafe -allow-unimplemented /dev/null ./pkg/sim 2>&1 | tail -200
-        env:
-          GOSIM_TRANSLATE_WORKERS: "8"
       - name: Replay seed 1
         run: |
           set -o pipefail
@@ -71,6 +66,20 @@ jobs:
         with:
           name: seed
           path: ${{ runner.temp }}/out
+
+  # sim.yml runs only by hand from main, so until it merges it runs here.
+  campaign:
+    uses: ./.github/workflows/sim.yml
+    with:
+      seeds: "1000"
+      first: "1"
+      per-job: "250"
+
+  planted:
+    uses: ./.github/workflows/sim.yml
+    with:
+      planted: all
+      first: "1"
 
   chaos:
     runs-on: ubuntu-24.04

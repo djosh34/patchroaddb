@@ -70,6 +70,10 @@ type scenario struct {
 	accounts int
 	keys     int
 	runFor   time.Duration
+	// think is a worker's mean pause between two statements. Without it
+	// the workers send tens of thousands of statements a seed, which costs
+	// minutes of CPU, where a thousand already contend.
+	think time.Duration
 
 	mu       syncutil.Mutex
 	failures []string
@@ -97,6 +101,7 @@ func newScenario(rng *rand.Rand, e env) *scenario {
 		workers:  2 + rng.IntN(4),
 		accounts: 3 + rng.IntN(5),
 		runFor:   time.Duration(20+rng.IntN(40)) * time.Second,
+		think:    time.Duration(50+rng.IntN(200)) * time.Millisecond,
 		ledger:   make(map[int]*ledgerKey),
 		stats:    make(map[string]int),
 	}
@@ -264,6 +269,7 @@ func (s *scenario) worker(ctx context.Context, w int, rng *rand.Rand, until time
 		if err != nil && conn.IsClosed() {
 			conn = nil
 		}
+		time.Sleep(time.Duration(rng.Int64N(int64(2 * s.think))))
 	}
 }
 
@@ -687,7 +693,8 @@ func (s *scenario) report() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var b bytes.Buffer
-	fmt.Fprintf(&b, "%d tables, %d workers, %d accounts, %d ledger keys, run %s\n", len(s.tables), s.workers, s.accounts, s.keys, s.runFor)
+	fmt.Fprintf(&b, "%d tables, %d workers, %d accounts, %d ledger keys, run %s, think %s\n",
+		len(s.tables), s.workers, s.accounts, s.keys, s.runFor, s.think)
 	for _, t := range s.tables {
 		fmt.Fprintf(&b, "  %s; %d rows\n", t.create(), t.rows)
 	}
