@@ -59,8 +59,6 @@ type proc struct {
 // bridged to the host at 10.9.0.254. n4 is for the restore.
 func chaosNS(i int) (ns, addr string) { return fmt.Sprintf("n%d", i+1), fmt.Sprintf("10.9.0.%d", i+1) }
 
-const chaosHost = "10.9.0.254"
-
 func (p *procs) root(args ...string) error {
 	out, err := exec.Command("sudo", args...).CombinedOutput()
 	if err != nil {
