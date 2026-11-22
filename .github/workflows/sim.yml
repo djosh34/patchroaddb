@@ -54,6 +54,7 @@ env:
 
 jobs:
   plan:
+    if: inputs.replay == ''
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -102,7 +103,7 @@ jobs:
           free -g
       - run: build/sim-build.sh bin/sim
         env:
-          PLANTED: ${{ (inputs.planted == 'all' || inputs.replay-planted != '') && '1' || '' }}
+          PLANTED: ${{ (inputs.replay != '' && inputs.replay-planted != '' || inputs.replay == '' && inputs.planted == 'all') && '1' || '' }}
           GOSIM_TRANSLATE_WORKERS: "8"
       - if: always()
         uses: actions/cache/save@v4

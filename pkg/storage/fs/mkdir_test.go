@@ -207,15 +207,17 @@ func TestMkdirAllStoreDirSurvivesCrash(t *testing.T) {
 	})
 }
 
-// TestMkdirAllStoreDirSkipsUnreadableParent checks that a parent the node
-// may not open, which it did not create, does not fail the call.
-func TestMkdirAllStoreDirSkipsUnreadableParent(t *testing.T) {
+// TestMkdirAllStoreDirRefusesUnreadableParent checks that a parent the node
+// may not open for its sync fails the call: the store directory in it would
+// not be durable.
+func TestMkdirAllStoreDirRefusesUnreadableParent(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	mem := vfs.NewStrictMem()
 	require.NoError(t, mem.MkdirAll("/home", os.ModePerm))
 	fs := &failOpenDir{MemFS: mem, dir: "/home", err: os.ErrPermission, times: 1 << 30}
-	require.NoError(t, MkdirAllStoreDir(fs, "/home/data", os.ModePerm))
+	err := MkdirAllStoreDir(fs, "/home/data", os.ModePerm)
+	require.True(t, oserror.IsPermission(err), "%v", err)
 }
 
 // TestMkdirAllStoreDirRefusesUncleanPath checks that MkdirAllStoreDir

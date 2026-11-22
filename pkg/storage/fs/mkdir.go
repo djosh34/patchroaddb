@@ -77,8 +77,8 @@ func MkdirAllAndSyncParents(fs vfs.FS, path string, perm os.FileMode) error {
 // and of each of its ancestors, up to the root. Whether an ancestor's entry
 // is durable cannot be told from its being there: an earlier start may have
 // created it and stopped before its sync, and a crash would then lose the
-// store. A parent that cannot be opened for lack of permission is skipped:
-// it was not created by the node, which creates directories it can read.
+// store. A parent it cannot sync, also for lack of read permission, fails
+// the call: the store would not be durable.
 //
 // The path must be clean, as the CLI makes store paths: with "..", "." or
 // a trailing separator, the directories it syncs would not be the ones
@@ -95,8 +95,9 @@ func MkdirAllStoreDir(fs vfs.FS, path string, perm os.FileMode) error {
 		if parent == dir {
 			return nil
 		}
-		if err := syncDir(fs, parent); err != nil && !oserror.IsPermission(err) {
-			return err
+		if err := syncDir(fs, parent); err != nil {
+			return errors.WithHintf(err,
+				"%s must be readable to make the store directory %s durable", parent, path)
 		}
 		dir = parent
 	}
