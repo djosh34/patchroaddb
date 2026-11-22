@@ -295,6 +295,33 @@ func TestReplay(t *testing.T) {
 	}
 }
 
+// TestFirstStart runs TestFirstStartPowerLoss, a fixed scenario rather than
+// a seed's: a power loss of every machine right after the cluster's first
+// start, after which each must come back as the node it was.
+func TestFirstStart(t *testing.T) {
+	bin := simEnv("SIM_BINARY")
+	if bin == "" {
+		skip.IgnoreLint(t, "SIM_BINARY is not set; sim.yml runs this test")
+	}
+	res, err := metatesting.ForTestBinary(t, bin).RunQuiet(&metatesting.RunConfig{
+		Test: "TestFirstStartPowerLoss", Seed: 1, ExtraEnv: []string{"PATCHROADDB_PLANTED="}, WallKill: 5 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := simEnv("SIM_OUT"); out != "" && res.Failed {
+		if err := os.MkdirAll(out, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(out, "first-start.txt"), readableLog(res.LogOutput), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if res.Failed || res.Ended {
+		t.Errorf("TestFirstStartPowerLoss failed: %s", res.Err)
+	}
+}
+
 // plantedChecks is, for each planted bug, whether a failing run's log
 // shows a failure of the check meant for it. A seed catches the bug only
 // with such a failure: another, such as a node that loses its store, shows

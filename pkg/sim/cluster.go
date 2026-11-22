@@ -115,9 +115,10 @@ func startArgs(addr, join string) []string {
 		"--listen-addr=" + addr + fmt.Sprintf(":%d", sqlPort),
 		"--http-addr=" + addr + fmt.Sprintf(":%d", httpPort),
 		"--join=" + join,
-		// A small ballast: on a first start, creating it creates the store
-		// directory, before anything else does, as on a real node.
-		"--store=path=/data,ballast-size=1MiB",
+		// A store whose parent does not exist yet, and a small ballast: on a
+		// first start, creating the ballast creates the store directory and
+		// its parent, before anything else does, as on a real node.
+		"--store=path=/mnt/data,ballast-size=1MiB",
 		// IMPORT reserves 32 MiB of SQL memory on each node for its
 		// bulk writer.
 		"--cache=32MiB", "--max-sql-memory=256MiB",

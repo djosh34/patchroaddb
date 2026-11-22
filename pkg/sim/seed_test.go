@@ -67,3 +67,49 @@ func TestSeed(t *testing.T) {
 		t.Error(f)
 	}
 }
+
+// TestFirstStartPowerLoss is the regression test of a node that lost its
+// whole store in a power loss soon after its first start (#59): the store
+// directory and its parent were created without syncing their parents. It
+// starts the cluster, cuts the power of every machine as soon as SQL works,
+// with none of the writes they had not synced, and checks that each machine
+// comes back as the node it was.
+func TestFirstStartPowerLoss(t *testing.T) {
+	gosim.SetSimulationTimeout(10 * time.Minute)
+	rng := seedRand(rand.Uint64(), rand.Uint64())
+	s3Env()
+	ctx := context.Background()
+	c, err := startCluster(ctx, 3, fakes3.New(rng), rng)
+	if err != nil {
+		t.Fatalf("starting the cluster: %v", err)
+	}
+	var ids []int64
+	for _, addr := range c.addrs() {
+		id, err := nodeID(ctx, addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	for i := range c.nodes {
+		c.crash(i)
+	}
+	for i := range c.nodes {
+		c.restart(i, false /* partial */)
+	}
+	for i, addr := range c.addrs() {
+		if err := waitSQL(ctx, addr, 3*time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		id, err := nodeID(ctx, addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id != ids[i] {
+			t.Errorf("%s came back as node %d, not node %d: it lost its store", addr, id, ids[i])
+		}
+	}
+	for _, f := range c.failed() {
+		t.Error(f)
+	}
+}
