@@ -53,6 +53,19 @@ jobs:
           cd pkg/sim
           SIM_BINARY=$GITHUB_WORKSPACE/bin/sim/sim-gosim.test SIM_SEED=1 SIM_OUT=$RUNNER_TEMP/out SIM_WALL_MINUTES=8 \
             /usr/bin/time -v $GITHUB_WORKSPACE/bin/sim/sim.test -test.run '^TestReplay$' -test.v -test.timeout 100m 2>&1 | tail -300
+      - name: Profile seed 1
+        if: always()
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y -q linux-tools-common "linux-tools-$(uname -r)" >/dev/null || sudo apt-get install -y -q linux-tools-generic >/dev/null
+          sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
+          PERF=$(ls /usr/lib/linux-tools/*/perf | head -1)
+          mkdir -p $RUNNER_TEMP/out
+          timeout 15m $PERF record -F 199 -g -o $RUNNER_TEMP/perf.data -- \
+            bin/sim/sim-gosim.test -test.run '^TestSeed$' -seeds 1 > $RUNNER_TEMP/out/profile-run.txt 2>&1 || true
+          tail -5 $RUNNER_TEMP/out/profile-run.txt
+          $PERF report -i $RUNNER_TEMP/perf.data --no-children --sort symbol --stdio -g none 2>/dev/null | head -150 | tee $RUNNER_TEMP/out/profile-self.txt
+          $PERF report -i $RUNNER_TEMP/perf.data --children --sort symbol --stdio -g none 2>/dev/null | head -300 > $RUNNER_TEMP/out/profile-children.txt
       - if: always()
         uses: actions/upload-artifact@v4
         with:
