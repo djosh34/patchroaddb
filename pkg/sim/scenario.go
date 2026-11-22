@@ -85,6 +85,9 @@ type scenario struct {
 	pitr hlc.Timestamp
 	// queries are generated SELECTs; the check compares their plans.
 	queries []query
+	// nodeIDs are the node IDs of the machines, in the order of
+	// env.addrs(), from before the faults.
+	nodeIDs []int64
 	// stats count what the workload did, for the log.
 	stats map[string]int
 	// phase, if set, is called as each phase of run ends, with its name,
@@ -181,6 +184,13 @@ func (s *scenario) exec(ctx context.Context, conn *pgx.Conn, sql string, args ..
 // setup creates the schema, IMPORTs the data from the fake S3 and creates
 // the bank and ledger tables. No faults run yet.
 func (s *scenario) setup(ctx context.Context) error {
+	for _, addr := range s.env.addrs() {
+		id, err := nodeID(ctx, addr)
+		if err != nil {
+			return err
+		}
+		s.nodeIDs = append(s.nodeIDs, id)
+	}
 	conn, err := connect(ctx, s.env.addrs()[0])
 	if err != nil {
 		return err
@@ -493,9 +503,17 @@ func (s *scenario) heal(ctx context.Context) error {
 			}
 		}
 	}
-	for _, addr := range s.env.addrs() {
+	for i, addr := range s.env.addrs() {
 		if err := waitSQL(ctx, addr, 3*time.Minute); err != nil {
 			return err
+		}
+		// A machine that comes back as another node lost its store.
+		id, err := nodeID(ctx, addr)
+		if err != nil {
+			return err
+		}
+		if id != s.nodeIDs[i] {
+			s.fail("%s came back as node %d, not node %d: it lost its store", addr, id, s.nodeIDs[i])
 		}
 	}
 	return nil

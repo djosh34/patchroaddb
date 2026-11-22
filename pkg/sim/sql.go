@@ -82,3 +82,15 @@ func waitSQL(ctx context.Context, addr string, limit time.Duration) error {
 		time.Sleep(time.Second)
 	}
 }
+
+// nodeID returns the node ID of the node at addr.
+func nodeID(ctx context.Context, addr string) (int64, error) {
+	conn, err := connect(ctx, addr)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	var id int64
+	err = conn.QueryRow(ctx, "SELECT crdb_internal.node_id()").Scan(&id)
+	return id, errors.Wrapf(err, "%s: node ID", addr)
+}

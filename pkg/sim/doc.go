@@ -32,6 +32,8 @@
 //     is left: gosim does not tell why a machine stopped, so a node that
 //     ends its process itself in another way while crashes in fsync are on
 //     looks like one of those crashes, and is restarted;
+//   - every machine keeps its store through the crashes and power losses:
+//     after the faults it is the node it was before them;
 //   - every acknowledged write to the ledger table survives the crashes;
 //   - transfers between accounts keep the total, which holds only if the
 //     transactions are serializable;
