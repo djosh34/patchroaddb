@@ -77,40 +77,69 @@ func MkdirAllAndSyncParents(fs vfs.FS, path string, perm os.FileMode) error {
 // and of each of its ancestors, up to the root. Whether an ancestor's entry
 // is durable cannot be told from its being there: an earlier start may have
 // created it and stopped before its sync, and a crash would then lose the
-// store. A parent it cannot sync, also for lack of read permission, fails
-// the call: the store would not be durable.
+// store. A parent it cannot sync fails the call: the store would not be
+// durable.
+//
+// It creates the cleaned path: Pebble names a store's files by joining its
+// directory with their names, which cleans it, so that is the directory
+// the store's files go to.
 func MkdirAllStoreDir(fs vfs.FS, path string, perm os.FileMode) error {
+	path = filepath.Clean(path)
 	if err := fs.MkdirAll(path, perm); err != nil {
 		return errors.Wrapf(err, "could not create all directories: %s", path)
 	}
-	dir, err := createdDir(fs, path)
+	dirs, err := dirsToSync(fs, path)
 	if err != nil {
 		return err
 	}
-	for {
-		parent := fs.PathDir(dir)
-		if parent == dir {
-			return nil
+	for _, dir := range dirs {
+		if err := syncDir(fs, dir); err != nil {
+			if oserror.IsPermission(err) {
+				err = errors.WithHintf(err, "%s must be readable to make the store directory %s durable", dir, path)
+			}
+			return err
 		}
-		if err := syncDir(fs, parent); err != nil {
-			return errors.WithHintf(err,
-				"%s must be readable to make the store directory %s durable", parent, path)
-		}
-		dir = parent
 	}
+	return nil
 }
 
-// createdDir is the directory that MkdirAll(path) creates. On disk, that is
-// path with its symbolic links resolved, as the system resolves them: its
-// ancestors on disk are the ones to sync, not those of a link, and a ".."
-// after a link leads to the link target's parent. An in-memory filesystem
-// has no links, so there it is path cleaned.
-func createdDir(fs vfs.FS, path string) (string, error) {
-	if fs != vfs.Default {
-		return filepath.Clean(path), nil
+// dirsToSync returns the parents of path and of each of its ancestors, up
+// to the root. On disk, a relative path is first made absolute, and the
+// parents along path with its symbolic links resolved are added: a link's
+// entry is in the directory that holds the link, and the entry of the
+// directory it points to is in that directory's own parent. An in-memory
+// filesystem has no links.
+func dirsToSync(fs vfs.FS, path string) ([]string, error) {
+	var dirs []string
+	seen := make(map[string]bool)
+	add := func(path string) {
+		for dir := path; ; {
+			parent := fs.PathDir(dir)
+			if parent == dir {
+				return
+			}
+			if !seen[parent] {
+				seen[parent] = true
+				dirs = append(dirs, parent)
+			}
+			dir = parent
+		}
 	}
-	dir, err := filepath.EvalSymlinks(path)
-	return dir, errors.Wrapf(err, "resolving %s", path)
+	if fs != vfs.Default {
+		add(path)
+		return dirs, nil
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	add(abs)
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return nil, errors.Wrapf(err, "resolving %s", abs)
+	}
+	add(resolved)
+	return dirs, nil
 }
 
 // syncDir syncs the directory dir.

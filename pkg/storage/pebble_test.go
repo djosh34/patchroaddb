@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -40,6 +41,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/errors/oserror"
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/objstorage/objstorageprovider"
 	"github.com/cockroachdb/pebble/vfs"
@@ -1696,4 +1698,30 @@ func TestNewStoreSurvivesCrash(t *testing.T) {
 	eng, err = Open(ctx, MakeLocation("/data", mem), st, MustExist)
 	require.NoError(t, err)
 	eng.Close()
+}
+
+// TestOpenCreatesTheStoreItUses checks that Open creates, and makes durable,
+// the directory the store's files go to, for a path with ".." after a
+// symbolic link: Pebble joins the store's file names to the path, which
+// cleans it, while the system resolves the link first. Both directories
+// exist here, as Open on such a path needs disk usage of the one the
+// system resolves.
+func TestOpenCreatesTheStoreItUses(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "disk", "sub"), 0755))
+	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "disk", "store"), 0755))
+	require.NoError(t, os.Symlink(filepath.Join(tmp, "disk", "sub"), filepath.Join(tmp, "link")))
+
+	eng, err := Open(context.Background(), Filesystem(tmp+"/link/../store"), cluster.MakeTestingClusterSettings())
+	require.NoError(t, err)
+	eng.Close()
+
+	_, err = os.Stat(filepath.Join(tmp, "store", MinVersionFilename))
+	require.NoError(t, err)
+	_, err = os.Stat(filepath.Join(tmp, "disk", "store", MinVersionFilename))
+	require.True(t, oserror.IsNotExist(err), "%v", err)
 }

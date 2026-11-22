@@ -221,29 +221,48 @@ func TestMkdirAllStoreDirRefusesUnreadableParent(t *testing.T) {
 	require.True(t, oserror.IsPermission(err), "%v", err)
 }
 
-// TestMkdirAllStoreDirResolvesLinks checks that on disk the directories
-// MkdirAllStoreDir syncs are those of the directory the system creates: a
-// path through a symbolic link, with a trailing separator or with ".."
-// after the link, names the link target's directories.
-func TestMkdirAllStoreDirResolvesLinks(t *testing.T) {
+// TestMkdirAllStoreDirCleansPath checks that MkdirAllStoreDir creates and
+// syncs the cleaned path: an in-memory filesystem would otherwise create a
+// directory named ".", whose entry nothing syncs.
+func TestMkdirAllStoreDirCleansPath(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	fs := vfs.NewStrictMem()
+	require.NoError(t, MkdirAllStoreDir(fs, "/a/./db/", os.ModePerm))
+	fs.ResetToSyncedState()
+	_, err := fs.Stat("/a/db")
+	require.NoError(t, err)
+}
+
+// TestDirsToSync checks which directories MkdirAllStoreDir syncs on disk:
+// the parents along the path made absolute, and along it with its links
+// resolved.
+func TestDirsToSync(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	tmp, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "disk", "sub"), 0755))
-	link := filepath.Join(tmp, "link")
-	require.NoError(t, os.Symlink(filepath.Join(tmp, "disk", "sub"), link))
+	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "disk", "sub", "store"), 0755))
+	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "links"), 0755))
+	require.NoError(t, os.Symlink(filepath.Join(tmp, "disk", "sub"), filepath.Join(tmp, "links", "link")))
 
-	for path, want := range map[string]string{
-		filepath.Join(link, "store") + "/":     filepath.Join(tmp, "disk", "sub", "store"),
-		link + "/../store2":                    filepath.Join(tmp, "disk", "store2"),
-		filepath.Join(tmp, ".", "plain") + "/": filepath.Join(tmp, "plain"),
+	dirs, err := dirsToSync(vfs.Default, filepath.Join(tmp, "links", "link", "store"))
+	require.NoError(t, err)
+	for _, want := range []string{
+		filepath.Join(tmp, "links", "link"), // the entry of store, through the link
+		filepath.Join(tmp, "links"),         // the entry of the link
+		filepath.Join(tmp, "disk", "sub"),   // the entry of store on disk
+		filepath.Join(tmp, "disk"),          // the entry of sub
+		tmp, "/",
 	} {
-		require.NoError(t, MkdirAllStoreDir(vfs.Default, path, 0755), path)
-		got, err := createdDir(vfs.Default, path)
-		require.NoError(t, err)
-		require.Equal(t, want, got, path)
-		_, err = os.Stat(want)
-		require.NoError(t, err, path)
+		require.Contains(t, dirs, want)
 	}
+
+	// A relative path is made absolute: the parents of the current
+	// directory are synced too.
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+	dirs, err = dirsToSync(vfs.Default, ".")
+	require.NoError(t, err)
+	require.Contains(t, dirs, filepath.Dir(wd))
 }
