@@ -20,7 +20,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/cli/cliflags"
-	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -29,7 +28,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log/logcrash"
 	"github.com/cockroachdb/cockroach/pkg/util/log/severity"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/pebble/vfs"
 	"github.com/spf13/cobra"
 )
 
@@ -183,11 +181,9 @@ func setupLogging(ctx context.Context, cmd *cobra.Command, isServerCmd, applyCon
 	}
 
 	// Configuration is ready to be applied. Ensure that the output log
-	// directories exist. Sync the parents of what it creates: the default
-	// log directory is inside the first store, and creating it creates the
-	// store directory.
+	// directories exist.
 	if err := h.Config.IterateDirectories(func(logDir string) error {
-		return fs.MkdirAllAndSyncParents(vfs.Default, logDir, 0755)
+		return os.MkdirAll(logDir, 0755)
 	}); err != nil {
 		return errors.Wrap(err, "unable to create log directory")
 	}

@@ -68,18 +68,6 @@ func TestMkdirAllAndSyncParents(t *testing.T) {
 		wantExist: []string{"/", "/a", "/a/b"},
 		wantGone:  []string{"/a/b/c", "/a/b/c/d"},
 	}, {
-		path:      "/a/b/c",
-		sync:      []string{"/", "/a"}, // "b" is not synced, and won't be because "c" exists
-		create:    "/a/b/c/d",
-		wantExist: []string{"/", "/a", "/a/b"},
-		wantGone:  []string{"/a/b/c", "/a/b/c/d"},
-	}, {
-		path:      "/a/b/c",
-		sync:      []string{"/", "/a"}, // "b" is not synced, and won't be because "c" exists
-		create:    "/a/b/c/d",
-		wantExist: []string{"/", "/a", "/a/b"},
-		wantGone:  []string{"/a/b/c", "/a/b/c/d"},
-	}, {
 		path:      "a/b", // test relative paths too
 		sync:      []string{"", "a"},
 		create:    "a/b/c",

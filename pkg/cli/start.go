@@ -166,6 +166,22 @@ func initMutexProfile() {
 	runtime.SetMutexProfileFraction(d)
 }
 
+// createStoreDirs creates the on-disk store directories, and syncs the
+// parent of every directory it creates. A store directory whose entry is
+// lost in a power loss loses the whole store, and the node comes back as a
+// new one.
+func createStoreDirs(fsys vfs.FS, specs []base.StoreSpec) error {
+	for _, spec := range specs {
+		if spec.InMemory {
+			continue
+		}
+		if err := fs.MkdirAllAndSyncParents(fsys, spec.Path, 0755); err != nil {
+			return errors.Wrapf(err, "creating store directory %s", spec.Path)
+		}
+	}
+	return nil
+}
+
 func initTraceDir(ctx context.Context, dir string) {
 	if dir == "" {
 		return
@@ -225,9 +241,8 @@ func initTempStorageConfig(
 	if !useStore.InMemory {
 		dir := useStore.Path
 		// Create the store dir, if it doesn't exist. The dir is required to exist
-		// by diskPercentResolverFactory. Sync the parents of what it creates:
-		// a store directory lost in a crash loses the whole store.
-		if err := fs.MkdirAllAndSyncParents(vfs.Default, dir, 0755); err != nil {
+		// by diskPercentResolverFactory.
+		if err := os.MkdirAll(dir, 0755); err != nil {
 			return base.TempStorageConfig{}, errors.Wrapf(err, "failed to create dir for first store: %s", dir)
 		}
 		var err error
@@ -417,6 +432,12 @@ func runStartInternal(
 	// (e.g. previously detected corruption), listen to them now.
 	if err := serverCfg.Stores.PriorCriticalAlertError(); err != nil {
 		return clierror.NewError(err, exit.FatalError())
+	}
+
+	// Create the store directories before logging, tracing or the temp
+	// storage setup can create them as a side effect.
+	if err := createStoreDirs(vfs.Default, serverCfg.Stores.Specs); err != nil {
+		return err
 	}
 
 	// Set a MakeProcessUnavailableFunc that will close all sockets. This guards
