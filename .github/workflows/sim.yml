@@ -127,6 +127,15 @@ jobs:
         with:
           name: sim-bin
           path: bin/sim
+      # A seed process takes about 1.5 GB; one that runs until its real
+      # time is up grows beyond that. The swap keeps the kernel from
+      # stopping the job, which would lose the shard's logs.
+      - name: Add 8 GB of swap
+        run: |
+          sudo fallocate -l 8G /swap-sim
+          sudo chmod 600 /swap-sim
+          sudo mkswap /swap-sim >/dev/null
+          sudo swapon /swap-sim
       - name: Run the shard's seeds
         env:
           SEEDS: ${{ inputs.seeds }}

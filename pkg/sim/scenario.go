@@ -44,7 +44,8 @@ type env interface {
 	restart(i int, partial bool)
 	// partition cuts node i off from the other nodes, or ends that.
 	partition(i int, on bool)
-	// delay sets the network delay between nodes i and j.
+	// delay sets the network delay between nodes i and j; 0 restores the
+	// base latency between them.
 	delay(i, j int, d time.Duration)
 	// s3Faults makes S3 fail and stall requests, or stop doing so.
 	s3Faults(on bool)

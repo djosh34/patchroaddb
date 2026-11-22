@@ -15,6 +15,7 @@ package sim
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"net/netip"
 	"os"
@@ -66,6 +67,11 @@ const (
 type cluster struct {
 	nodes []*node
 	s3    *fakes3.Server
+	// rng draws the network's latencies.
+	rng *rand.Rand
+	// latency is the base latency between two machines, by their addresses
+	// in order; a delay fault replaces it for a while.
+	latency map[[2]string]time.Duration
 
 	mu syncutil.Mutex
 	// failures are the nodes that stopped without the harness crashing
@@ -128,9 +134,10 @@ func nodeMain(args []string) func() {
 }
 
 // startCluster starts the fake S3 server and n nodes, initializes the
-// cluster and waits until SQL works on every node.
-func startCluster(ctx context.Context, n int, s3 *fakes3.Server) (*cluster, error) {
-	c := &cluster{s3: s3}
+// cluster and waits until SQL works on every node. rng draws the network's
+// latencies.
+func startCluster(ctx context.Context, n int, s3 *fakes3.Server, rng *rand.Rand) (*cluster, error) {
+	c := &cluster{s3: s3, rng: rng, latency: make(map[[2]string]time.Duration)}
 	s3.CreateBucket(s3Bucket)
 	gosim.NewMachine(gosim.MachineConfig{
 		Label: "s3",
@@ -155,6 +162,12 @@ func startCluster(ctx context.Context, n int, s3 *fakes3.Server) (*cluster, erro
 		c.nodes = append(c.nodes, nd)
 		go c.watch(nd)
 	}
+
+	addrs := []string{s3Addr, initAddr}
+	for _, nd := range c.nodes {
+		addrs = append(addrs, nd.addr)
+	}
+	c.addLatencies(addrs)
 
 	// patchroaddb init, from a machine of its own: the CLI retries until
 	// the first node answers, and exits when it is done. A node that stops
@@ -187,6 +200,30 @@ func startCluster(ctx context.Context, n int, s3 *fakes3.Server) (*cluster, erro
 		}
 	}
 	return c, nil
+}
+
+// addLatencies gives each pair of the machines a base latency of 0.2 to 2
+// ms, drawn from the seed. gosim's network delivers at once by default;
+// with no latency, two machines that answer each other at once never let
+// simulated time pass, and the seed runs until its real time is up.
+func (c *cluster) addLatencies(addrs []string) {
+	for i, a := range addrs {
+		for _, b := range addrs[i+1:] {
+			if _, ok := c.latency[pair(a, b)]; ok {
+				continue
+			}
+			d := time.Duration(200+c.rng.IntN(1800)) * time.Microsecond
+			c.latency[pair(a, b)] = d
+			_ = gosim.SetDelay(a, b, d)
+		}
+	}
+}
+
+func pair(a, b string) [2]string {
+	if a > b {
+		a, b = b, a
+	}
+	return [2]string{a, b}
 }
 
 // watch records a node that stops on its own: a crash of patchroaddb.
@@ -301,8 +338,14 @@ func (c *cluster) partition(i int, on bool) {
 	}
 }
 
+// delay sets the delay between nodes i and j; 0 restores their base
+// latency.
 func (c *cluster) delay(i, j int, d time.Duration) {
-	_ = gosim.SetDelay(c.nodes[i].addr, c.nodes[j].addr, d)
+	a, b := c.nodes[i].addr, c.nodes[j].addr
+	if d == 0 {
+		d = c.latency[pair(a, b)]
+	}
+	_ = gosim.SetDelay(a, b, d)
 }
 
 func (c *cluster) s3Faults(on bool) {
@@ -325,6 +368,7 @@ func (c *cluster) startRestoreNode(ctx context.Context) (string, error) {
 		MainFunc: nodeMain(args),
 	})
 	go c.watch(nd)
+	c.addLatencies(append([]string{s3Addr, nd.addr}, c.addrs()...))
 	return nd.addr, waitSQL(ctx, nd.addr, 2*time.Minute)
 }
 

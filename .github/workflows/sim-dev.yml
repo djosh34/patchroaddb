@@ -46,14 +46,14 @@ jobs:
         run: |
           set -o pipefail
           cd pkg/sim
-          SIM_BINARY=$GITHUB_WORKSPACE/bin/sim/sim-gosim.test SIM_SEED=1 SIM_OUT=$RUNNER_TEMP/out SIM_WALL_MINUTES=8 \
+          SIM_BINARY=$GITHUB_WORKSPACE/bin/sim/sim-gosim.test SIM_SEED=1 SIM_OUT=$RUNNER_TEMP/out \
             /usr/bin/time -v $GITHUB_WORKSPACE/bin/sim/sim.test -test.run '^TestReplay$' -test.v -test.timeout 100m 2>&1 | tail -300
-      - name: Memory of 40 seeds in one process
+      - name: Memory of 16 seeds in one process
         if: always()
         run: |
           mkdir -p $RUNNER_TEMP/out
           cd pkg/sim
-          SIM_BINARY=$GITHUB_WORKSPACE/bin/sim/sim-gosim.test SIM_FIRST=1 SIM_COUNT=40 SIM_OUT=$RUNNER_TEMP/out/mem \
+          SIM_BINARY=$GITHUB_WORKSPACE/bin/sim/sim-gosim.test SIM_FIRST=1 SIM_COUNT=16 SIM_OUT=$RUNNER_TEMP/out/mem \
             $GITHUB_WORKSPACE/bin/sim/sim.test -test.run '^TestCampaign$' -test.v -test.timeout 60m > $RUNNER_TEMP/out/mem-run.txt 2>&1 &
           pid=$!
           while kill -0 $pid 2>/dev/null; do

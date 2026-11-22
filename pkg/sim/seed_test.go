@@ -51,7 +51,7 @@ func TestSeed(t *testing.T) {
 		cpu("cpu-seconds")
 	}()
 
-	c, err := startCluster(ctx, 3, s3)
+	c, err := startCluster(ctx, 3, s3, rand.New(rand.NewPCG(rng.Uint64(), rng.Uint64())))
 	if err != nil {
 		t.Fatalf("starting the cluster: %v", err)
 	}

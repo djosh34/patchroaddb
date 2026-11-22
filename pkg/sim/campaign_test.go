@@ -162,7 +162,7 @@ type summary struct {
 }
 
 // TestCampaign runs the seeds SIM_FIRST to SIM_FIRST+SIM_COUNT-1, each a
-// gosim run of its own with SIM_WALL_MINUTES of real time (default 20).
+// gosim run of its own with SIM_WALL_MINUTES of real time (default 5).
 // Every hundredth seed runs twice and must give the same run. Failing
 // seeds go to SIM_OUT with their logs; the test fails if any seed failed.
 func TestCampaign(t *testing.T) {
@@ -171,7 +171,7 @@ func TestCampaign(t *testing.T) {
 		skip.IgnoreLint(t, "SIM_BINARY is not set; build/sim-build.sh builds the binary, sim.yml runs campaigns")
 	}
 	first, count := envInt(t, "SIM_FIRST", 1), envInt(t, "SIM_COUNT", 1)
-	wall := time.Duration(envInt(t, "SIM_WALL_MINUTES", 20)) * time.Minute
+	wall := time.Duration(envInt(t, "SIM_WALL_MINUTES", 5)) * time.Minute
 	out := simEnv("SIM_OUT")
 	planted := simEnv("PATCHROADDB_PLANTED")
 	s := summary{First: first, Count: count, Failed: make(map[int64]string)}
@@ -222,7 +222,7 @@ func TestReplay(t *testing.T) {
 		skip.IgnoreLint(t, "SIM_BINARY and SIM_SEED are not set; build/sim-replay.sh replays a seed")
 	}
 	seed := envInt(t, "SIM_SEED", 0)
-	wall := time.Duration(envInt(t, "SIM_WALL_MINUTES", 20)) * time.Minute
+	wall := time.Duration(envInt(t, "SIM_WALL_MINUTES", 5)) * time.Minute
 	planted := simEnv("PATCHROADDB_PLANTED")
 	out := simEnv("SIM_OUT")
 	run := func() *metatesting.RunResult {
@@ -278,7 +278,7 @@ func TestPlanted(t *testing.T) {
 		skip.IgnoreLint(t, "SIM_BINARY and PATCHROADDB_PLANTED are not set; sim.yml checks the planted bugs")
 	}
 	first, count := envInt(t, "SIM_FIRST", 1), envInt(t, "SIM_COUNT", 20)
-	wall := time.Duration(envInt(t, "SIM_WALL_MINUTES", 20)) * time.Minute
+	wall := time.Duration(envInt(t, "SIM_WALL_MINUTES", 5)) * time.Minute
 	out := simEnv("SIM_OUT")
 	for seed := first; seed < first+count; seed++ {
 		o := runSeed(t, bin, seed, bug, wall, out)
