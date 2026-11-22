@@ -1680,27 +1680,20 @@ func TestPebbleLoggingSlowReads(t *testing.T) {
 
 // TestNewStoreSurvivesCrash checks that a new store is durable once Open
 // returns: a crash right after the first start must not lose the store
-// directory, whose entry in its parent was never synced before. On a real
-// start the CLI creates the store directory first, for its logs and temp
-// storage, without the engine.
+// directory, whose entry in its parent was never synced before.
 func TestNewStoreSurvivesCrash(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	testutils.RunTrueAndFalse(t, "created-before-open", func(t *testing.T, createdBefore bool) {
-		ctx := context.Background()
-		mem := vfs.NewStrictMem()
-		if createdBefore {
-			require.NoError(t, mem.MkdirAll("/data/logs", 0755))
-		}
-		st := cluster.MakeTestingClusterSettings()
-		eng, err := Open(ctx, MakeLocation("/data", mem), st)
-		require.NoError(t, err)
-		eng.Close()
+	ctx := context.Background()
+	mem := vfs.NewStrictMem()
+	st := cluster.MakeTestingClusterSettings()
+	eng, err := Open(ctx, MakeLocation("/data", mem), st)
+	require.NoError(t, err)
+	eng.Close()
 
-		mem.ResetToSyncedState()
-		eng, err = Open(ctx, MakeLocation("/data", mem), st, MustExist)
-		require.NoError(t, err)
-		eng.Close()
-	})
+	mem.ResetToSyncedState()
+	eng, err = Open(ctx, MakeLocation("/data", mem), st, MustExist)
+	require.NoError(t, err)
+	eng.Close()
 }

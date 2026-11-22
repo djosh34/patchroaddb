@@ -70,23 +70,3 @@ func MkdirAllAndSyncParents(fs vfs.FS, path string, perm os.FileMode) error {
 
 	return nil
 }
-
-// MkdirAllDurable creates dir like MkdirAllAndSyncParents, and also syncs
-// dir's parent when dir already exists: whoever created it may not have
-// synced it, and a directory whose entry is lost in a crash loses all it
-// holds.
-func MkdirAllDurable(fs vfs.FS, dir string, perm os.FileMode) error {
-	if err := MkdirAllAndSyncParents(fs, dir, perm); err != nil {
-		return err
-	}
-	parent := fs.PathDir(dir)
-	handle, err := fs.OpenDir(parent)
-	if err != nil {
-		return errors.Wrapf(err, "could not open parent dir: %s", parent)
-	}
-	if err := handle.Sync(); err != nil {
-		_ = handle.Close()
-		return errors.Wrapf(err, "could not sync parent dir: %s", parent)
-	}
-	return errors.Wrapf(handle.Close(), "could not close parent dir: %s", parent)
-}

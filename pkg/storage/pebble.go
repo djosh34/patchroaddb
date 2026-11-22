@@ -1063,15 +1063,19 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (p *Pebble, err error) {
 			filesystemCloser.Close()
 		}
 	}()
-	// mkdir makes the store and auxiliary directories durable: a store
+	// mkdir syncs the parents of the directories it creates: a store
 	// directory whose entry is lost in a crash loses the whole store. An
 	// in-memory filesystem has no current directory, so a relative path
 	// there has no parent to sync; then mkdir only creates them.
 	mkdir := func(dir string, perm os.FileMode) error {
-		return fs.MkdirAllDurable(opts.FS, dir, perm)
+		return fs.MkdirAllAndSyncParents(opts.FS, dir, perm)
 	}
-	if _, err := opts.FS.Stat("."); err != nil && !filepath.IsAbs(cfg.Dir) {
-		mkdir = opts.FS.MkdirAll
+	if !filepath.IsAbs(cfg.Dir) {
+		if _, err := opts.FS.Stat("."); oserror.IsNotExist(err) {
+			mkdir = opts.FS.MkdirAll
+		} else if err != nil {
+			return nil, err
+		}
 	}
 	if !opts.ReadOnly {
 		if err := mkdir(cfg.Dir, os.ModePerm); err != nil {

@@ -238,3 +238,21 @@ func TestMaybeEstablishBallast(t *testing.T) {
 		require.Equal(t, 4096, getSize(t, path))
 	})
 }
+
+// TestBallastCreatesStoreDurably checks that establishing the ballast, which
+// on a node's first start runs before anything else and creates the store
+// directory and its missing parents, makes them durable.
+func TestBallastCreatesStoreDurably(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer temporarilyEnableBallasts()()
+
+	mem := vfs.NewStrictMem()
+	ballastPath := base.EmergencyBallastFile(mem.PathJoin, "/new/data")
+	// No space for the ballast file itself: only its directories are made.
+	_, err := maybeEstablishBallast(mem, ballastPath, 1<<20, vfs.DiskUsage{})
+	require.NoError(t, err)
+
+	mem.ResetToSyncedState()
+	_, err = mem.Stat("/new/data")
+	require.NoError(t, err)
+}
