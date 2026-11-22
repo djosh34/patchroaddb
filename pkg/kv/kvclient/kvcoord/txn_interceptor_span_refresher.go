@@ -21,6 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/planted"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
 )
@@ -571,7 +572,7 @@ func (sr *txnSpanRefresher) tryRefreshTxnSpans(
 	if sr.refreshInvalid {
 		log.VEvent(ctx, 2, "can't refresh txn spans; not valid")
 		return kvpb.NewError(errors.AssertionFailedf("can't refresh txn spans; not valid"))
-	} else if sr.refreshFootprint.empty() {
+	} else if sr.refreshFootprint.empty() || planted.On(planted.SkipRefresh) {
 		log.VEvent(ctx, 2, "there are no txn spans to refresh")
 		sr.forwardRefreshTimestampOnRefresh(refreshToTxn)
 		return nil

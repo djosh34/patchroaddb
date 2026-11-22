@@ -16,6 +16,8 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	mathrand "math/rand/v2"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -23,18 +25,36 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
 	"github.com/cockroachdb/cockroach/pkg/backup/backuptest"
+	"github.com/cockroachdb/cockroach/pkg/sim/fakes3"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 )
 
 // TestS3Contract checks every S3 call that Store makes against a real S3
-// server: what the backup code relies on. Outcome 10 runs the same tests
-// against the simulator's fake S3.
+// server: what the backup code relies on.
 func TestS3Contract(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	ctx := context.Background()
 	bucket, endpoint := backuptest.NewBucket(t)
+	testS3Contract(t, bucket, endpoint)
+}
+
+// TestS3ContractFake runs the same checks against the simulator's fake S3,
+// so that the simulator's S3 behaves as a real one where the backup code
+// depends on it.
+func TestS3ContractFake(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	t.Setenv("AWS_ACCESS_KEY_ID", "fake")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "fake")
+	fake := fakes3.New(mathrand.New(mathrand.NewPCG(1, 2)))
+	fake.CreateBucket("fake")
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	testS3Contract(t, "fake", srv.URL)
+}
+
+func testS3Contract(t *testing.T, bucket, endpoint string) {
+	ctx := context.Background()
 	s, err := OpenStore(ctx, Repository{Bucket: bucket, Prefix: "repo", Endpoint: endpoint, Region: backuptest.Region})
 	require.NoError(t, err)
 

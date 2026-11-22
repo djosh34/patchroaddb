@@ -43,6 +43,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/planted"
 	"github.com/cockroachdb/errors"
 )
 
@@ -319,7 +320,11 @@ func load(
 		eng.Close()
 		return nil, err
 	}
-	for _, h := range c.segments {
+	segments := c.segments
+	if planted.On(planted.LostSegment) && len(segments) > 0 {
+		segments = segments[:len(segments)-1]
+	}
+	for _, h := range segments {
 		paths = paths[:0]
 		if _, err := readSegment(ctx, s, h.Number, false, func(_ FileInfo, sst []byte) error {
 			p, err := write(sst)

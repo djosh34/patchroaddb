@@ -53,6 +53,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
+	"github.com/cockroachdb/cockroach/pkg/util/planted"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
 )
@@ -2104,6 +2105,9 @@ func planSelectionOperators(
 			if op == nil || err != nil {
 				// op hasn't been created yet, so let's try the constructor for
 				// all other selection operators.
+				if planted.On(planted.WrongFilter) && cmpOp.Symbol == treecmp.GE && lTyp.Family() == types.IntFamily {
+					cmpOp = treecmp.MakeComparisonOperator(treecmp.GT)
+				}
 				op, err = colexecsel.GetSelectionConstOperator(
 					cmpOp, leftOp, ct, leftIdx, constArg, evalCtx, t,
 				)

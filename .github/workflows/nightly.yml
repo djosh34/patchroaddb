@@ -1,6 +1,6 @@
-# Runs the test and logic shards of ci.yml with the race detector, every night
-# and on manual start. The race detector needs cgo; no code of this repository
-# uses cgo.
+# Runs every night and on manual start: the test and logic shards of ci.yml
+# with the race detector, and the real-process chaos run. The race detector
+# needs cgo; no code of this repository uses cgo.
 name: nightly
 
 on:
@@ -39,3 +39,22 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-go
       - run: build/ci/test.sh logic ${{ matrix.shard }} 4 -race -timeout 300m
+
+  # The real-process chaos run (build/ci/chaos.sh): the simulator's
+  # scenario on the real binary, kernel, disk and network, with random
+  # kills, partitions, network delay, S3 outages and a restore check.
+  chaos:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-go
+      - run: go build -o bin/patchroaddb ./pkg/cmd/patchroaddb
+      - run: build/ci/chaos.sh bin/patchroaddb "$RUNNER_TEMP/chaos"
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos
+          path: ${{ runner.temp }}/chaos

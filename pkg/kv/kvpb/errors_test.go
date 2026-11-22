@@ -188,6 +188,15 @@ func TestErrorRedaction(t *testing.T) {
 		require.Equal(t, exp, string(act))
 	})
 
+	t.Run("wrapped", func(t *testing.T) {
+		// Wrapped, the error prints as its error, not as the fields of its
+		// PErr, which hold a pointer.
+		r := &UnhandledRetryableError{PErr: *NewError(NewTransactionAbortedError(ABORT_REASON_UNKNOWN))}
+		wrapped := errors.Wrapf(r, "failed").Error()
+		require.Equal(t, "failed: "+r.Error(), wrapped)
+		require.NotContains(t, wrapped, "0x")
+	})
+
 	// The purpose of these tests is to ensure that most of the error is printed
 	// without redaction markers. The contents of the error aren't really being
 	// tested here, although the test could be extended to care more about that.

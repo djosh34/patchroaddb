@@ -37,3 +37,4 @@ customenv.mk
 
 # Temporary directories during gomock generate
 **/gomock_reflect_*
+.gosim/

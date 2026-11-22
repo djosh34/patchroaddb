@@ -1,8 +1,6 @@
 module github.com/cockroachdb/cockroach
 
-go 1.27
-
-toolchain go1.27.4
+go 1.27.4
 
 // Tests seed math/rand with randutil.SeedForTests, so that the logged seed
 // reproduces a failure. Since Go 1.24, rand.Seed does nothing unless
@@ -80,6 +78,7 @@ require (
 	// parameter such as options=-ccluster=x and read "+" as itself, which
 	// breaks the URLs that CockroachDB documents.
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/jellevandenhooff/gosim v0.0.0
 	github.com/jordanlewis/gcassert v0.0.0-20230505190637-fed79d91cd5f
 	github.com/kisielk/errcheck v1.9.0
 	github.com/kisielk/gotool v1.0.0
@@ -94,7 +93,7 @@ require (
 	github.com/lufia/iostat v1.2.1
 	github.com/maruel/panicparse/v2 v2.2.2
 	github.com/marusama/semaphore v0.0.0-20190110074507-6952cef993b2
-	github.com/mattn/go-isatty v0.0.17
+	github.com/mattn/go-isatty v0.0.20
 	github.com/mitchellh/reflectwalk v1.0.0
 	github.com/mkungla/bexp/v3 v3.0.1
 	github.com/montanaflynn/stats v0.7.1
@@ -312,3 +311,5 @@ tool (
 	golang.org/x/tools/cmd/goyacc
 	honnef.co/go/tools/cmd/staticcheck
 )
+
+replace github.com/jellevandenhooff/gosim => github.com/djosh34/gosim v0.0.0-20261122101639-021d72187a9c

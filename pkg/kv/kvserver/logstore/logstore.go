@@ -32,6 +32,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
+	"github.com/cockroachdb/cockroach/pkg/util/planted"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"go.etcd.io/raft/v3"
@@ -236,7 +237,7 @@ func (s *LogStore) storeEntriesAndCommitBatch(
 	stats.PebbleBegin = timeutil.Now()
 	stats.PebbleBytes = int64(batch.Len())
 	wantsSync := len(m.Responses) > 0
-	willSync := wantsSync && !DisableSyncRaftLog.Get(&s.Settings.SV)
+	willSync := wantsSync && !DisableSyncRaftLog.Get(&s.Settings.SV) && !planted.On(planted.LostSync)
 	// Use the non-blocking log sync path if we are performing a log sync ...
 	nonBlockingSync := willSync &&
 		// and the cluster setting is enabled ...

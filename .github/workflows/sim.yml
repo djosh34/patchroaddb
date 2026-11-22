@@ -1,0 +1,223 @@
+# A seed campaign of the simulator (pkg/sim/doc.go), only when started by
+# hand, on any ref:
+#
+#   gh workflow run sim.yml --ref <ref> -f seeds=100000 -f first=1
+#
+# One job builds the binaries once. Then a matrix of jobs, all submitted at
+# once, each runs a fixed range of seeds in PROCS processes; GitHub queues
+# them and runs as many as the account allows. A seed that fails or runs
+# out of real time is a failure, and its full logs and replay command are
+# uploaded, also when its job fails. The last job counts every assigned
+# seed: a campaign counts only when all of them ran and passed.
+#
+# With planted=all, the run instead checks that every planted bug
+# (pkg/util/planted) is caught within its seed budget.
+name: sim
+run-name: >-
+  sim ${{ inputs.planted == 'all' && 'planted bugs' || format('{0} seeds from {1}', inputs.seeds, inputs.first) }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: How many seeds
+        default: "100000"
+      first:
+        description: The first seed
+        default: "1"
+      per-job:
+        description: Seeds per job, so that a job stays under 5.5 hours
+        default: "1000"
+      planted:
+        description: "'all' checks the planted bugs instead of running a campaign"
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CGO_ENABLED: "0"
+  # Seed processes a job runs at once, one a CPU of the runner.
+  PROCS: "4"
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - id: plan
+        env:
+          SEEDS: ${{ inputs.seeds }}
+          FIRST: ${{ inputs.first }}
+          PER: ${{ inputs.per-job }}
+        run: |
+          set -euo pipefail
+          for v in "$SEEDS" "$FIRST" "$PER"; do
+            [[ $v =~ ^[0-9]+$ ]] || { echo "$v is not a number"; exit 1; }
+          done
+          jobs=$(( (SEEDS + PER - 1) / PER ))
+          if (( jobs < 1 || jobs > 256 )); then
+            echo "$jobs jobs: a matrix holds 1 to 256"
+            exit 1
+          fi
+          echo "$jobs jobs of up to $PER seeds"
+          echo "shards=$(seq -s, 0 $((jobs - 1)) | sed 's/^/[/; s/$/]/')" >>"$GITHUB_OUTPUT"
+
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-go
+      # gosim keeps its translation of each package in this database, so a
+      # build translates only the packages that changed since the last one.
+      # It is saved even when the build fails, for the next try.
+      - uses: actions/cache/restore@v4
+        with:
+          path: .gosim/cache.sqlite3
+          key: sim-gosim-${{ github.sha }}
+          restore-keys: sim-gosim-
+      # Translating the tree peaks near the runner's 16 GB of memory; the
+      # swap keeps the kernel from stopping the job.
+      - name: Add 8 GB of swap
+        run: |
+          sudo fallocate -l 8G /swap-sim
+          sudo chmod 600 /swap-sim
+          sudo mkswap /swap-sim >/dev/null
+          sudo swapon /swap-sim
+          free -g
+      - run: build/sim-build.sh bin/sim
+        env:
+          PLANTED: ${{ inputs.planted == 'all' && '1' || '' }}
+          GOSIM_TRANSLATE_WORKERS: "8"
+      - if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .gosim/cache.sqlite3
+          key: sim-gosim-${{ github.sha }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sim-bin
+          path: bin/sim
+          retention-days: 7
+
+  seeds:
+    if: inputs.planted != 'all'
+    needs: [plan, build]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 345
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sim-bin
+          path: bin/sim
+      # A seed process takes about 1.5 GB; one that runs until its real
+      # time is up grows beyond that. The swap keeps the kernel from
+      # stopping the job, which would lose the shard's logs.
+      - name: Add 8 GB of swap
+        run: |
+          sudo fallocate -l 8G /swap-sim
+          sudo chmod 600 /swap-sim
+          sudo mkswap /swap-sim >/dev/null
+          sudo swapon /swap-sim
+      - name: Run the shard's seeds
+        env:
+          SEEDS: ${{ inputs.seeds }}
+          FIRST: ${{ inputs.first }}
+          PER: ${{ inputs.per-job }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -uo pipefail
+          chmod +x bin/sim/*.test
+          start=$((FIRST + SHARD * PER))
+          end=$((FIRST + SEEDS))
+          end=$(( start + PER < end ? start + PER : end ))
+          per=$(( (end - start + PROCS - 1) / PROCS ))
+          mkdir -p "$RUNNER_TEMP/out"
+          cd pkg/sim
+          pids=()
+          for p in $(seq 0 $((PROCS - 1))); do
+            s=$((start + p * per))
+            n=$(( s + per < end ? per : end - s ))
+            (( n > 0 )) || continue
+            echo "process $p: seeds $s to $((s + n - 1))"
+            SIM_BINARY=$GITHUB_WORKSPACE/bin/sim/sim-gosim.test SIM_FIRST=$s SIM_COUNT=$n SIM_OUT=$RUNNER_TEMP/out \
+              "$GITHUB_WORKSPACE/bin/sim/sim.test" -test.run '^TestCampaign$' -test.v -test.timeout 340m \
+              >"$RUNNER_TEMP/out/process-$p.log" 2>&1 &
+            pids+=($!)
+          done
+          status=0
+          for pid in "${pids[@]}"; do
+            wait "$pid" || status=1
+          done
+          grep -h -E -- '^--- FAIL|seed [0-9]+ failed|seeds, ' "$RUNNER_TEMP"/out/process-*.log | head -100 || true
+          exit $status
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-out-${{ matrix.shard }}
+          path: ${{ runner.temp }}/out
+
+  summary:
+    if: always() && inputs.planted != 'all'
+    needs: [plan, seeds]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sim-out-*
+          path: out
+      - env:
+          FIRST: ${{ inputs.first }}
+          SEEDS: ${{ inputs.seeds }}
+        run: |
+          set -o pipefail
+          build/sim-summary.sh out "$FIRST" "$SEEDS" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  planted:
+    if: inputs.planted == 'all'
+    needs: [plan, build]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 345
+    strategy:
+      fail-fast: false
+      matrix:
+        # The bugs of pkg/util/planted, with each bug's seed budget.
+        include:
+          # Power losses show this bug, and also the bugs of #59 that
+          # fail a seed first: it takes more seeds.
+          - {bug: lost-sync, budget: 60}
+          - {bug: skip-refresh, budget: 30}
+          - {bug: wrong-filter, budget: 30}
+          - {bug: internal-error, budget: 30}
+          - {bug: lost-segment, budget: 30}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sim-bin
+          path: bin/sim
+      - name: Catch ${{ matrix.bug }}
+        env:
+          PATCHROADDB_PLANTED: ${{ matrix.bug }}
+          SIM_FIRST: ${{ inputs.first }}
+          SIM_COUNT: ${{ matrix.budget }}
+        run: |
+          chmod +x bin/sim/*.test
+          cd pkg/sim
+          SIM_BINARY=$GITHUB_WORKSPACE/bin/sim/sim-gosim.test SIM_OUT=$RUNNER_TEMP/out \
+            "$GITHUB_WORKSPACE/bin/sim/sim.test" -test.run '^TestPlanted$' -test.v -test.timeout 340m
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: planted-${{ matrix.bug }}
+          path: ${{ runner.temp }}/out

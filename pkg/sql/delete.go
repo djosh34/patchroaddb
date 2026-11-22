@@ -18,6 +18,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/util/planted"
+	"github.com/cockroachdb/errors"
 )
 
 var deleteNodePool = sync.Pool{
@@ -151,6 +153,9 @@ func (d *deleteNode) BatchedNext(params runParams) (bool, error) {
 // processSourceRow processes one row from the source for deletion and, if
 // result rows are needed, saves it in the result row container
 func (d *deleteNode) processSourceRow(params runParams, sourceVals tree.Datums) error {
+	if planted.On(planted.InternalError) && d.run.td.currentBatchSize >= 4 {
+		return errors.AssertionFailedf("planted bug: a DELETE of more than four rows")
+	}
 	// Create a set of partial index IDs to not delete from. Indexes should not
 	// be deleted from when they are partial indexes and the row does not
 	// satisfy the predicate and therefore do not exist in the partial index.
