@@ -1700,12 +1700,11 @@ func TestNewStoreSurvivesCrash(t *testing.T) {
 	eng.Close()
 }
 
-// TestOpenCreatesTheStoreItUses checks that Open creates, and makes durable,
-// the directory the store's files go to, for a path with ".." after a
-// symbolic link: Pebble joins the store's file names to the path, which
-// cleans it, while the system resolves the link first. Both directories
-// exist here, as Open on such a path needs disk usage of the one the
-// system resolves.
+// TestOpenCreatesTheStoreItUses checks that Open uses one directory for a
+// path with ".." after a symbolic link: Pebble joins the store's file names
+// to the path, which cleans it, while the system resolves the link first.
+// Open cleans the path, so its directory syncs and disk usage go to the
+// directory the files go to, and nothing to the one behind the link.
 func TestOpenCreatesTheStoreItUses(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -1713,7 +1712,6 @@ func TestOpenCreatesTheStoreItUses(t *testing.T) {
 	tmp, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "disk", "sub"), 0755))
-	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "disk", "store"), 0755))
 	require.NoError(t, os.Symlink(filepath.Join(tmp, "disk", "sub"), filepath.Join(tmp, "link")))
 
 	eng, err := Open(context.Background(), Filesystem(tmp+"/link/../store"), cluster.MakeTestingClusterSettings())
@@ -1722,6 +1720,6 @@ func TestOpenCreatesTheStoreItUses(t *testing.T) {
 
 	_, err = os.Stat(filepath.Join(tmp, "store", MinVersionFilename))
 	require.NoError(t, err)
-	_, err = os.Stat(filepath.Join(tmp, "disk", "store", MinVersionFilename))
+	_, err = os.Stat(filepath.Join(tmp, "disk", "store"))
 	require.True(t, oserror.IsNotExist(err), "%v", err)
 }

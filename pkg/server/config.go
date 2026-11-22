@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -792,11 +793,13 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 
 			detail(redact.Sprintf("store %d: in-memory, size %s", i, humanizeutil.IBytes(sizeInBytes)))
 		} else {
-			location = storage.Filesystem(spec.Path)
-			if err := fs.MkdirAllStoreDir(vfs.Default, spec.Path, 0755); err != nil {
+			// The cleaned path, as the engine uses (storage.NewPebble).
+			path := filepath.Clean(spec.Path)
+			location = storage.Filesystem(path)
+			if err := fs.MkdirAllStoreDir(vfs.Default, path, 0755); err != nil {
 				return Engines{}, errors.Wrap(err, "creating store directory")
 			}
-			du, err := vfs.Default.GetDiskUsage(spec.Path)
+			du, err := vfs.Default.GetDiskUsage(path)
 			if err != nil {
 				return Engines{}, errors.Wrap(err, "retrieving disk usage")
 			}

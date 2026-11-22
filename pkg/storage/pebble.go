@@ -1030,6 +1030,13 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (p *Pebble, err error) {
 	if cfg.Settings == nil {
 		return nil, errors.AssertionFailedf("NewPebble requires cfg.Settings to be set")
 	}
+	// Pebble names the store's files by joining them to its directory, which
+	// cleans the path. Every other use of the directory takes the cleaned
+	// path too, so that all of them, also those the system resolves, such as
+	// directory syncs and disk usage, name the same directory.
+	if cfg.Dir != "" {
+		cfg.Dir = filepath.Clean(cfg.Dir)
+	}
 
 	var opts *pebble.Options
 	if cfg.Opts == nil {

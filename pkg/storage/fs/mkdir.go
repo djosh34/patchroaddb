@@ -131,7 +131,7 @@ func dirsToSync(fs vfs.FS, path string) ([]string, error) {
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrapf(err, "making %s absolute", path)
 	}
 	add(abs)
 	resolved, err := filepath.EvalSymlinks(abs)
