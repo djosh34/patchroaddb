@@ -106,7 +106,9 @@ func startArgs(addr, join string) []string {
 		"--http-addr=" + addr + fmt.Sprintf(":%d", httpPort),
 		"--join=" + join,
 		"--store=path=/data,ballast-size=0",
-		"--cache=32MiB", "--max-sql-memory=64MiB",
+		// IMPORT reserves 32 MiB of SQL memory on each node for its
+		// bulk writer.
+		"--cache=32MiB", "--max-sql-memory=256MiB",
 		"--config=/sim.yaml",
 		"--logtostderr=INFO", "--log-dir=",
 	}
