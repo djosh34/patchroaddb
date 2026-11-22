@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -40,6 +41,7 @@ type seedOutcome struct {
 	cpuSeconds float64
 	wall       time.Duration
 	checksum   []byte
+	log        []byte
 }
 
 // runSeed runs TestSeed with the seed in a gosim run, ended after wall of
@@ -71,6 +73,7 @@ func runSeed(
 	}
 	if res != nil {
 		o.checksum = res.Checksum
+		o.log = res.LogOutput
 		if v, err := strconv.ParseFloat(string(res.Artifacts["cpu-seconds"]), 64); err == nil {
 			o.cpuSeconds = v
 		}
@@ -102,6 +105,22 @@ func runSeed(
 		}
 	}
 	return o
+}
+
+// hexAddress is a heap address as Go prints a pointer.
+var hexAddress = regexp.MustCompile(`0x[0-9a-f]{6,}`)
+
+// sameRun reports whether two runs of a seed, by their checksums and logs,
+// are the same run. gosim's checksum covers what the run logs, and a few
+// log lines print a pointer, such as an error struct with %v, whose address
+// depends on where the heap put it. So two runs whose logs are equal but
+// for hex addresses are the same run: every line has its step, machine,
+// goroutine and simulated time, and they all match.
+func sameRun(checksumA, logA, checksumB, logB []byte) bool {
+	if bytes.Equal(checksumA, checksumB) {
+		return true
+	}
+	return bytes.Equal(hexAddress.ReplaceAll(logA, []byte("0x")), hexAddress.ReplaceAll(logB, []byte("0x")))
 }
 
 // readableLog turns the JSON lines of a gosim run's log into text: the
@@ -198,7 +217,7 @@ func TestCampaign(t *testing.T) {
 		if !o.failed && seed%100 == 0 {
 			again := runSeed(t, bin, seed, planted, wall, "")
 			s.Replayed++
-			if again.failed || !bytes.Equal(again.checksum, o.checksum) {
+			if again.failed || !sameRun(o.checksum, o.log, again.checksum, again.log) {
 				o.failed, o.reason = true, fmt.Sprintf("the seed's second run differs from its first: %s", again.reason)
 			}
 		}
@@ -257,7 +276,7 @@ func TestReplay(t *testing.T) {
 	write("log.txt", first)
 	t.Logf("seed %d: failed %v %s", seed, first.Failed, first.Err)
 	second := run()
-	if !bytes.Equal(first.Checksum, second.Checksum) || first.Failed != second.Failed {
+	if !sameRun(first.Checksum, first.LogOutput, second.Checksum, second.LogOutput) || first.Failed != second.Failed {
 		write("log-2.txt", second)
 		t.Errorf("seed %d: the second run differs from the first: checksum %x, failed %v, against %x, failed %v",
 			seed, first.Checksum, first.Failed, second.Checksum, second.Failed)
@@ -302,4 +321,22 @@ func TestPlanted(t *testing.T) {
 		return
 	}
 	t.Fatalf("%s: not caught in %d seeds from %d", bug, count, first)
+}
+
+func TestSameRun(t *testing.T) {
+	// The line that differed between two runs of seed 900.
+	line := func(addr string) []byte {
+		return []byte(`{"step":1813,"machine":"n1","msg":"failed to push during intent resolution: {<nil> 0 {` + addr + `} index:0"}` + "\n")
+	}
+	a, b := line("0x3202721a2ed8"), line("0x32025cd763c8")
+	if !sameRun([]byte{1}, a, []byte{2}, b) {
+		t.Error("logs that differ in an address are not the same run")
+	}
+	other := []byte(`{"step":1814,"machine":"n1","msg":"failed to push during intent resolution: {<nil> 0 {0x32025cd763c8} index:0"}` + "\n")
+	if sameRun([]byte{1}, a, []byte{2}, other) {
+		t.Error("logs that differ in a step are the same run")
+	}
+	if !sameRun([]byte{1}, a, []byte{1}, other) {
+		t.Error("runs with one checksum are not the same run")
+	}
 }
