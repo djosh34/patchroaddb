@@ -288,7 +288,12 @@ func TestPlanted(t *testing.T) {
 		t.Logf("%s: seed %d failed: %s", bug, seed, o.reason)
 		// A seed that fails without the bug too shows nothing about the
 		// bug; a campaign reports it. The next seed may.
-		without := runSeed(t, bin, seed, "", wall, out)
+		// Its logs go apart, not over those of the run with the bug.
+		withoutOut := out
+		if out != "" {
+			withoutOut = filepath.Join(out, "without-bug")
+		}
+		without := runSeed(t, bin, seed, "", wall, withoutOut)
 		if without.failed {
 			t.Logf("%s: seed %d fails without the bug too: %s", bug, seed, without.reason)
 			continue
