@@ -12,6 +12,7 @@ package fs
 
 import (
 	"os"
+	"path/filepath"
 
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/errors/oserror"
@@ -33,7 +34,15 @@ import (
 //
 // TODO(pavelkalinnikov): have a type-safe canonical path type which can be
 // iterated without thinking about . and .. placeholders.
+//
+// If a sync fails, it removes the directories it found missing, so that a
+// retry creates and syncs them again. It assumes that nothing else creates
+// those directories meanwhile: on startup they are created one at a time,
+// and the sideload storage, the one caller that runs concurrently, creates
+// its directory again when it finds it missing.
 func MkdirAllAndSyncParents(fs vfs.FS, path string, perm os.FileMode) error {
+	// A trailing separator would name the same directory twice below.
+	path = filepath.Clean(path)
 	// Find the lowest existing directory in the hierarchy.
 	var exists string
 	for dir, parent := path, ""; ; dir = parent {
@@ -57,8 +66,7 @@ func MkdirAllAndSyncParents(fs vfs.FS, path string, perm os.FileMode) error {
 
 	// Sync parent directories up to the lowest existing ancestor, included.
 	// If one fails, remove the directories this call created, which are
-	// still empty: a retry would find them there, skip the sync, and their
-	// entries could be lost in a crash.
+	// still empty (see above).
 	for dir, parent := path, ""; dir != exists; dir = parent {
 		parent = fs.PathDir(dir)
 		if err := syncDir(fs, parent); err != nil {

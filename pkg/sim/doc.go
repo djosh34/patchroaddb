@@ -55,9 +55,9 @@
 // TestCampaign runs a range of seeds, TestReplay one seed twice,
 // TestPlanted the planted bugs and TestFirstStart a power loss right
 // after the first start (TestFirstStartPowerLoss). build/sim-build.sh
-// builds both, and
-// .github/workflows/sim.yml runs campaigns. TestChaos runs the same
-// scenario on real processes, every night (build/ci/chaos.sh).
+// builds both, and .github/workflows/sim.yml runs campaigns. TestChaos
+// runs the same scenario on real processes, every night
+// (build/ci/chaos.sh).
 //
 // Bugs that a campaign finds are fixed in the bug-finding outcome, each
 // with a regression test.

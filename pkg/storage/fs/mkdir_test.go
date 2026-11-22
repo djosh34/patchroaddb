@@ -180,10 +180,14 @@ func (fs *failOpenDirOnce) OpenDir(name string) (vfs.File, error) {
 func TestMkdirAllAndSyncParentsRetryAfterSyncError(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	fs := &failOpenDirOnce{MemFS: vfs.NewStrictMem(), dir: "/"}
-	require.Error(t, MkdirAllAndSyncParents(fs, "/data", os.ModePerm))
-	require.NoError(t, MkdirAllAndSyncParents(fs, "/data", os.ModePerm))
-	fs.ResetToSyncedState()
-	_, err := fs.Stat("/data")
-	require.NoError(t, err)
+	for _, path := range []string{"/data", "/a/b/"} {
+		t.Run(path, func(t *testing.T) {
+			fs := &failOpenDirOnce{MemFS: vfs.NewStrictMem(), dir: "/"}
+			require.Error(t, MkdirAllAndSyncParents(fs, path, os.ModePerm))
+			require.NoError(t, MkdirAllAndSyncParents(fs, path, os.ModePerm))
+			fs.ResetToSyncedState()
+			_, err := fs.Stat(path)
+			require.NoError(t, err)
+		})
+	}
 }

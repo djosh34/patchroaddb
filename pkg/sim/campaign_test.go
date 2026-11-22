@@ -309,7 +309,7 @@ func TestFirstStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out := simEnv("SIM_OUT"); out != "" && res.Failed {
+	if out := simEnv("SIM_OUT"); out != "" && (res.Failed || res.Ended) {
 		if err := os.MkdirAll(out, 0o755); err != nil {
 			t.Fatal(err)
 		}
