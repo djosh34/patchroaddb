@@ -102,7 +102,7 @@ func newScenario(rng *rand.Rand, e env) *scenario {
 		tables:   genSchema(rng),
 		workers:  2 + rng.IntN(4),
 		accounts: 3 + rng.IntN(5),
-		runFor:   time.Duration(15+rng.IntN(20)) * time.Second,
+		runFor:   time.Duration(10+rng.IntN(15)) * time.Second,
 		think:    time.Duration(100+rng.IntN(300)) * time.Millisecond,
 		ledger:   make(map[int]*ledgerKey),
 		stats:    make(map[string]int),

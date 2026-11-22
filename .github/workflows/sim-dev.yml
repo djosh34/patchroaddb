@@ -42,11 +42,11 @@ jobs:
         with:
           path: .gosim/cache.sqlite3
           key: sim-gosim-${{ github.sha }}
-      - name: Replay seed 1
+      - name: Replay seed 900
         run: |
           set -o pipefail
           cd pkg/sim
-          SIM_BINARY=$GITHUB_WORKSPACE/bin/sim/sim-gosim.test SIM_SEED=1 SIM_OUT=$RUNNER_TEMP/out \
+          SIM_BINARY=$GITHUB_WORKSPACE/bin/sim/sim-gosim.test SIM_SEED=900 SIM_OUT=$RUNNER_TEMP/out \
             /usr/bin/time -v $GITHUB_WORKSPACE/bin/sim/sim.test -test.run '^TestReplay$' -test.v -test.timeout 100m 2>&1 | tail -300
       - if: always()
         uses: actions/upload-artifact@v4
