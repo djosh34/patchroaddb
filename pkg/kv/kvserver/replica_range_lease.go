@@ -1467,8 +1467,22 @@ func (r *Replica) redirectOnOrAcquireLeaseForRequest(
 								// The RequestLease command we sent was rejected because another
 								// lease was applied in the meantime, but we own that other
 								// lease. So, loop until the current node becomes aware that
-								// it's the leaseholder.
-								return nil
+								// it's the leaseholder: until this replica has applied that
+								// lease, or its lease serves the request.
+								//
+								// A rejection can also name the lease this replica already has,
+								// while that lease still cannot serve the request, as when the
+								// node's own liveness record is not in its cache yet. Another
+								// attempt would be rejected the same way at once, and the
+								// request would spin without ever waiting. Fall through to a
+								// NotLeaseHolderError instead, so the client backs off.
+								r.mu.RLock()
+								applied := r.mu.state.Lease.Sequence >= tErr.Existing.Sequence
+								st := r.leaseStatusForRequestRLocked(ctx, r.store.Clock().NowAsClockTimestamp(), reqTS)
+								r.mu.RUnlock()
+								if !applied || (st.IsValid() && st.OwnedBy(r.store.StoreID())) {
+									return nil
+								}
 							}
 
 							// Getting a LeaseRejectedError back means someone else got there

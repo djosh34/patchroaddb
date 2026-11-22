@@ -2007,6 +2007,58 @@ func TestTxnWriteTimestampInLeaseStasis(t *testing.T) {
 	require.True(t, preLease.Expiration.Less(*postLease.Expiration), "expected extension")
 }
 
+// TestLeaseRejectedNamingOwnLeaseDoesNotSpin tests a lease request that is
+// rejected at once with the replica's own, expired lease as the existing
+// one, as happens when the node's own liveness record is not in its cache.
+// Before, the request retried the lease request without waiting, again and
+// again, until its lease acquisition timed out.
+func TestLeaseRejectedNamingOwnLeaseDoesNotSpin(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	ctx := context.Background()
+	manualClock := hlc.NewHybridManualClock()
+	var rangeID atomic.Int64
+	var rejections atomic.Int64
+	tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{
+		ReplicationMode: base.ReplicationManual,
+		ServerArgs: base.TestServerArgs{
+			Knobs: base.TestingKnobs{
+				Store: &kvserver.StoreTestingKnobs{
+					DisableAutomaticLeaseRenewal: true,
+					TestingRequestFilter: func(ctx context.Context, ba *kvpb.BatchRequest) *kvpb.Error {
+						req, ok := ba.GetArg(kvpb.RequestLease)
+						if !ok || int64(ba.RangeID) != rangeID.Load() {
+							return nil
+						}
+						rejections.Add(1)
+						lease := req.(*kvpb.RequestLeaseRequest)
+						return kvpb.NewError(&kvpb.LeaseRejectedError{
+							Existing:  lease.PrevLease,
+							Requested: lease.Lease,
+							Message:   "rejected by the test",
+						})
+					},
+				},
+				Server: &server.TestingKnobs{WallClock: manualClock},
+			},
+		},
+	})
+	defer tc.Stopper().Stop(ctx)
+	key := tc.ScratchRangeWithExpirationLease(t)
+	store := tc.GetFirstStoreFromServer(t, 0)
+	repl := store.LookupReplica(roachpb.RKey(key))
+	_, pErr := kv.SendWrapped(ctx, store.TestSender(), getArgs(key))
+	require.NoError(t, pErr.GoError())
+	lease, _ := repl.GetLease()
+
+	// Let the lease expire, and reject every attempt to renew it.
+	manualClock.Increment(lease.Expiration.WallTime - manualClock.UnixNano() + 1)
+	rangeID.Store(int64(repl.RangeID))
+	_, pErr = kv.SendWrapped(ctx, store.TestSender(), getArgs(key))
+	require.True(t, errors.HasType(pErr.GoError(), (*kvpb.NotLeaseHolderError)(nil)), "%v", pErr)
+	require.LessOrEqual(t, rejections.Load(), int64(3))
+}
+
 // TestRangeLocalUncertaintyLimitAfterNewLease verifies that on lease
 // transfer, the normal limiting of a request's local uncertainty limit
 // to the first observed timestamp on a node is extended to include the
