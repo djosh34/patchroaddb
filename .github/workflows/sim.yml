@@ -12,9 +12,15 @@
 #
 # With planted=all, the run instead checks that every planted bug
 # (pkg/util/planted) is caught within its seed budget.
+#
+# With replay=<seed>, and replay-planted=<bug> for a planted bug, the run
+# instead replays that one seed, as build/sim-replay.sh does, and uploads
+# its full log:
+#
+#   gh workflow run sim.yml --ref <ref> -f replay=<seed>
 name: sim
 run-name: >-
-  sim ${{ inputs.planted == 'all' && 'planted bugs' || format('{0} seeds from {1}', inputs.seeds, inputs.first) }}
+  sim ${{ inputs.replay != '' && format('replay of seed {0}', inputs.replay) || inputs.planted == 'all' && 'planted bugs' || format('{0} seeds from {1}', inputs.seeds, inputs.first) }}
 
 on:
   workflow_dispatch:
@@ -30,6 +36,12 @@ on:
         default: "1000"
       planted:
         description: "'all' checks the planted bugs instead of running a campaign"
+        default: ""
+      replay:
+        description: A seed to replay instead of running a campaign
+        default: ""
+      replay-planted:
+        description: The planted bug of the seed to replay, if any
         default: ""
 
 permissions:
@@ -77,8 +89,8 @@ jobs:
       - uses: actions/cache/restore@v4
         with:
           path: .gosim/cache.sqlite3
-          key: sim-gosim-${{ github.sha }}
-          restore-keys: sim-gosim-
+          key: sim-gosim-${{ runner.arch }}-${{ github.sha }}
+          restore-keys: sim-gosim-${{ runner.arch }}-
       # Translating the tree peaks near the runner's 16 GB of memory; the
       # swap keeps the kernel from stopping the job.
       - name: Add 8 GB of swap
@@ -90,13 +102,13 @@ jobs:
           free -g
       - run: build/sim-build.sh bin/sim
         env:
-          PLANTED: ${{ inputs.planted == 'all' && '1' || '' }}
+          PLANTED: ${{ (inputs.planted == 'all' || inputs.replay-planted != '') && '1' || '' }}
           GOSIM_TRANSLATE_WORKERS: "8"
       - if: always()
         uses: actions/cache/save@v4
         with:
           path: .gosim/cache.sqlite3
-          key: sim-gosim-${{ github.sha }}
+          key: sim-gosim-${{ runner.arch }}-${{ github.sha }}
       - uses: actions/upload-artifact@v4
         with:
           name: sim-bin
@@ -104,7 +116,7 @@ jobs:
           retention-days: 7
 
   seeds:
-    if: inputs.planted != 'all'
+    if: inputs.planted != 'all' && inputs.replay == ''
     needs: [plan, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 345
@@ -169,7 +181,7 @@ jobs:
   # node's first start (pkg/sim TestFirstStart): a fixed scenario, not a
   # seed.
   first-start:
-    if: inputs.planted != 'all'
+    if: inputs.planted != 'all' && inputs.replay == ''
     needs: [build]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -193,7 +205,7 @@ jobs:
           if-no-files-found: ignore
 
   summary:
-    if: always() && inputs.planted != 'all'
+    if: always() && inputs.planted != 'all' && inputs.replay == ''
     needs: [plan, seeds, first-start]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -218,7 +230,7 @@ jobs:
           [[ $RESULT == success ]]
 
   planted:
-    if: inputs.planted == 'all'
+    if: inputs.planted == 'all' && inputs.replay == ''
     needs: [plan, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 345
@@ -254,4 +266,32 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: planted-${{ matrix.bug }}
+          path: ${{ runner.temp }}/out
+
+  # Replays one seed twice on this commit, as build/sim-replay.sh does,
+  # and uploads its full log and artifacts.
+  replay:
+    if: inputs.replay != ''
+    needs: [build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sim-bin
+          path: bin/sim
+      - name: Replay seed ${{ inputs.replay }}
+        env:
+          SIM_SEED: ${{ inputs.replay }}
+          PATCHROADDB_PLANTED: ${{ inputs.replay-planted }}
+        run: |
+          chmod +x bin/sim/*.test
+          cd pkg/sim
+          SIM_BINARY=$GITHUB_WORKSPACE/bin/sim/sim-gosim.test SIM_OUT=$RUNNER_TEMP/out/replay-$SIM_SEED \
+            "$GITHUB_WORKSPACE/bin/sim/sim.test" -test.run '^TestReplay$' -test.v -test.timeout 60m
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: replay-${{ inputs.replay }}
           path: ${{ runner.temp }}/out
