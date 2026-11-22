@@ -303,9 +303,7 @@ var plantedChecks = map[string]func(log []byte) bool{
 	// Lost Raft log entries show as a lost acknowledged write, or as a
 	// node's log.Fatal on Raft's own check of its log.
 	planted.LostSync: func(log []byte) bool {
-		return failedWith(log, prefix("ledger key ")) ||
-			(failedWith(log, contains("stopped on its own: log.Fatal")) &&
-				bytes.Contains(log, []byte("is out of range [lastIndex(")))
+		return failedWith(log, prefix("ledger key ")) || raftLogFatal(log)
 	},
 	planted.SkipRefresh:   func(log []byte) bool { return failedWith(log, prefix("the accounts hold ")) },
 	planted.WrongFilter:   func(log []byte) bool { return failedWith(log, prefix("results differ at ")) },
@@ -313,12 +311,42 @@ var plantedChecks = map[string]func(log []byte) bool{
 	planted.LostSegment:   func(log []byte) bool { return failedWith(log, prefix("table ")) },
 }
 
-func prefix(p string) func(string) bool {
-	return func(msg string) bool { return strings.HasPrefix(msg, p) }
+// lostRaftLog is how Raft's check of a node's log reports entries the log
+// should hold but does not.
+const lostRaftLog = "is out of range [lastIndex("
+
+// raftLogFatal reports whether a node stopped on a log.Fatal, and its own
+// log, on its own machine, shows Raft's check of its log failing.
+func raftLogFatal(log []byte) bool {
+	fatal := make(map[string]bool) // the nodes that stopped on a log.Fatal
+	raft := make(map[string]bool)  // the machines whose log shows lostRaftLog
+	for _, line := range bytes.Split(log, []byte("\n")) {
+		var m struct {
+			Msg     string `json:"msg"`
+			Method  string `json:"method"`
+			Machine string `json:"machine"`
+		}
+		if json.Unmarshal(line, &m) != nil {
+			continue
+		}
+		if node, rest, ok := strings.Cut(m.Msg, " "); m.Method == "t.Error" && ok &&
+			strings.HasPrefix(rest, "stopped on its own: log.Fatal") {
+			fatal[node] = true
+		}
+		if strings.Contains(m.Msg, lostRaftLog) {
+			raft[m.Machine] = true
+		}
+	}
+	for node := range fatal {
+		if raft[node] {
+			return true
+		}
+	}
+	return false
 }
 
-func contains(p string) func(string) bool {
-	return func(msg string) bool { return strings.Contains(msg, p) }
+func prefix(p string) func(string) bool {
+	return func(msg string) bool { return strings.HasPrefix(msg, p) }
 }
 
 // TestPlanted runs seeds from SIM_FIRST with the planted bug
@@ -396,11 +424,16 @@ func TestPlantedChecks(t *testing.T) {
 		t.Error("a log line counts as a failure")
 	}
 	fatal := []byte(`{"msg":"n2 stopped on its own: log.Fatal, exit code 7","method":"t.Error"}` + "\n")
-	raft := []byte(`{"msg":"F200115 ... tocommit(627) is out of range [lastIndex(535)]. Was the raft log corrupted, truncated, or lost?","machine":"n2"}` + "\n")
+	raft := func(machine string) []byte {
+		return []byte(`{"msg":"F200115 ... tocommit(627) is out of range [lastIndex(535)]. Was the raft log corrupted, truncated, or lost?","machine":"` + machine + `"}` + "\n")
+	}
 	if plantedChecks[planted.LostSync](fatal) {
 		t.Error("a log.Fatal for another reason counts for lost-sync")
 	}
-	if !plantedChecks[planted.LostSync](append(raft, fatal...)) {
+	if !plantedChecks[planted.LostSync](append(raft("n2"), fatal...)) {
 		t.Error("a log.Fatal on a Raft log out of range does not count for lost-sync")
+	}
+	if plantedChecks[planted.LostSync](append(raft("n3"), fatal...)) {
+		t.Error("n2's log.Fatal counts for lost-sync on n3's Raft check")
 	}
 }
