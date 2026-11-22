@@ -175,7 +175,7 @@ func createStoreDirs(fsys vfs.FS, specs []base.StoreSpec) error {
 		if spec.InMemory {
 			continue
 		}
-		if err := fs.MkdirAllAndSyncParents(fsys, spec.Path, 0755); err != nil {
+		if err := fs.MkdirAllStoreDir(fsys, spec.Path, 0755); err != nil {
 			return errors.Wrapf(err, "creating store directory %s", spec.Path)
 		}
 	}

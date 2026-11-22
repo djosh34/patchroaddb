@@ -1068,7 +1068,7 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (p *Pebble, err error) {
 	// in-memory filesystem has no current directory, so a relative path
 	// there has no parent to sync; then mkdir only creates them.
 	mkdir := func(dir string, perm os.FileMode) error {
-		return fs.MkdirAllAndSyncParents(opts.FS, dir, perm)
+		return fs.MkdirAllStoreDir(opts.FS, dir, perm)
 	}
 	if !filepath.IsAbs(cfg.Dir) {
 		if _, err := opts.FS.Stat("."); oserror.IsNotExist(err) {

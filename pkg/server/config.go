@@ -793,7 +793,7 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 			detail(redact.Sprintf("store %d: in-memory, size %s", i, humanizeutil.IBytes(sizeInBytes)))
 		} else {
 			location = storage.Filesystem(spec.Path)
-			if err := fs.MkdirAllAndSyncParents(vfs.Default, spec.Path, 0755); err != nil {
+			if err := fs.MkdirAllStoreDir(vfs.Default, spec.Path, 0755); err != nil {
 				return Engines{}, errors.Wrap(err, "creating store directory")
 			}
 			du, err := vfs.Default.GetDiskUsage(spec.Path)

@@ -316,6 +316,14 @@ func TestFirstStart(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(out, "first-start.txt"), readableLog(res.LogOutput), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		// Such as the stack of every goroutine of a run that ran out of
+		// real time.
+		for name, data := range res.Artifacts {
+			path := filepath.Join(out, "first-start-"+filepath.Base(name))
+			if err := os.WriteFile(path, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	if res.Failed || res.Ended {
 		t.Errorf("TestFirstStartPowerLoss failed: %s", res.Err)

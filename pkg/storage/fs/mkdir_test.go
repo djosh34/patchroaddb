@@ -174,17 +174,17 @@ func (fs *failOpenDirOnce) OpenDir(name string) (vfs.File, error) {
 	return fs.MemFS.OpenDir(name)
 }
 
-// TestMkdirAllAndSyncParentsRetryAfterSyncError checks that a call that
-// failed to sync a parent does not leave its new directories behind: a
-// retry must create and sync them again.
-func TestMkdirAllAndSyncParentsRetryAfterSyncError(t *testing.T) {
+// TestMkdirAllStoreDirRetryAfterSyncError checks that a call that failed
+// to sync a parent does not leave its new directories behind: a retry must
+// create and sync them again.
+func TestMkdirAllStoreDirRetryAfterSyncError(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	for _, path := range []string{"/data", "/a/b/"} {
 		t.Run(path, func(t *testing.T) {
 			fs := &failOpenDirOnce{MemFS: vfs.NewStrictMem(), dir: "/"}
-			require.Error(t, MkdirAllAndSyncParents(fs, path, os.ModePerm))
-			require.NoError(t, MkdirAllAndSyncParents(fs, path, os.ModePerm))
+			require.Error(t, MkdirAllStoreDir(fs, path, os.ModePerm))
+			require.NoError(t, MkdirAllStoreDir(fs, path, os.ModePerm))
 			fs.ResetToSyncedState()
 			_, err := fs.Stat(path)
 			require.NoError(t, err)
