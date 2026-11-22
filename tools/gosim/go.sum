@@ -32,10 +32,10 @@ github.com/dave/jennifer v1.5.0/go.mod h1:4MnyiFIlZS3l5tSDn8VnzE6ffAhYBMB2SZntBs
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-github.com/djosh34/gosim v0.0.0-20261122005123-8c142747df9f h1:DFp7jCapNzVtOZ+6DrSO0YxR1sg9qx3nJUjb/JxtOMA=
-github.com/djosh34/gosim v0.0.0-20261122005123-8c142747df9f/go.mod h1:/sXSNVhDApMiki2K1X91jsCZxV5OU8sEMa9jKpiuud4=
-github.com/djosh34/gosim/cmd/gosim v0.0.0-20261122005123-8c142747df9f h1:VPN7ACO4eWUHNrJFr1fMJm8BSJCc87mkcfZ5PlDJ65I=
-github.com/djosh34/gosim/cmd/gosim v0.0.0-20261122005123-8c142747df9f/go.mod h1:u53LmhDoEchOSxG7UGzYgtFh048aoau381eq76Rkx74=
+github.com/djosh34/gosim v0.0.0-20261122031833-871ddf0fecb9 h1:1l80I+50vs+9Gbnaqo1kNIYdWRLEbpeHrthTR/ZuqLQ=
+github.com/djosh34/gosim v0.0.0-20261122031833-871ddf0fecb9/go.mod h1:/sXSNVhDApMiki2K1X91jsCZxV5OU8sEMa9jKpiuud4=
+github.com/djosh34/gosim/cmd/gosim v0.0.0-20261122031833-871ddf0fecb9 h1:phB8MkZpqSoEkIyw999ec/frJh7flG6oiLrTqdaxH/w=
+github.com/djosh34/gosim/cmd/gosim v0.0.0-20261122031833-871ddf0fecb9/go.mod h1:u53LmhDoEchOSxG7UGzYgtFh048aoau381eq76Rkx74=
 github.com/dlclark/regexp2 v1.11.4 h1:rPYF9/LECdNymJufQKmri9gV604RvvABwgOA8un7yAo=
 github.com/dlclark/regexp2 v1.11.4/go.mod h1:DHkYz0B9wPfa6wondMfaivmHpzrQ3v9q8cnmRbL6yW8=
 github.com/dominikbraun/graph v0.23.0 h1:TdZB4pPqCLFxYhdyMFb1TBdFxp8XLcJfTTBQucVPgCo=
