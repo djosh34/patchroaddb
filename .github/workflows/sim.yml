@@ -92,8 +92,6 @@ jobs:
         env:
           PLANTED: ${{ inputs.planted == 'all' && '1' || '' }}
           GOSIM_TRANSLATE_WORKERS: "8"
-          # gosim keeps its translations in SQLite, through cgo.
-          CGO_ENABLED: "1"
       - if: always()
         uses: actions/cache/save@v4
         with:

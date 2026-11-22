@@ -14,7 +14,6 @@ package sim
 
 import (
 	"context"
-	"math/rand/v2"
 	"os/exec"
 	"os/user"
 	"strings"
@@ -44,7 +43,7 @@ func TestChaos(t *testing.T) {
 	}
 	seed := uint64(envInt(t, "CHAOS_SEED", timeutil.Now().UnixNano()))
 	t.Logf("CHAOS_SEED=%d", seed)
-	rng := rand.New(rand.NewPCG(seed, 0))
+	rng := seedRand(seed, 0)
 	p := &procs{
 		bin:      bin,
 		dir:      simEnv("CHAOS_DIR"),

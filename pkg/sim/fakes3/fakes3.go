@@ -314,7 +314,8 @@ func parseRange(h string, n int) (start, end int, ok bool) {
 		if err != nil || l < start {
 			return 0, 0, false
 		}
-		end = min(l+1, n)
+		// min before adding one: l may be the largest int.
+		end = min(l, n-1) + 1
 	}
 	return start, end, true
 }
@@ -461,6 +462,10 @@ func (s *Server) listObjects(
 	}
 	slices.Sort(keys)
 	res := listResult{Name: bucketName, Prefix: prefix, MaxKeys: maxKeys, ContinuationToken: get("continuation-token")}
+	if maxKeys == 0 {
+		// An empty page, with no token to continue from.
+		keys = nil
+	}
 	if len(keys) > maxKeys {
 		keys = keys[:maxKeys]
 		res.IsTruncated = true

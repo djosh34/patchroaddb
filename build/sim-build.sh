@@ -13,7 +13,9 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 out=${1:-$root/bin/sim}
 mkdir -p "$out"
 cd "$root"
-go build -C tools/gosim -o "$root/.gosim/bin/gosim" github.com/jellevandenhooff/gosim/cmd/gosim
+# gosim keeps its translations in SQLite, through cgo: it needs a C
+# compiler, whatever CGO_ENABLED the caller has.
+CGO_ENABLED=1 go build -C tools/gosim -o "$root/.gosim/bin/gosim" github.com/jellevandenhooff/gosim/cmd/gosim
 # noasm picks the pure Go code of libraries such as klauspost/compress and
 # snappy: gosim drops assembly outside the standard library. disableunsafe
 # keeps testify's copy of go-spew from reading reflect.Value's fields, which

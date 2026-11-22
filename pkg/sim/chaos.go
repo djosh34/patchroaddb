@@ -43,6 +43,8 @@ type procs struct {
 	nodes    []*proc
 	restored *proc
 	failures []string
+	// faultsOn are the faults that are on, by name.
+	faultsOn map[string]bool
 }
 
 type proc struct {
@@ -159,35 +161,74 @@ func (p *procs) restart(i int, _ bool) {
 	}
 }
 
-// partition drops the node's traffic to and from the other nodes; the
-// host, where the workload runs, still reaches it.
+// partition drops the node's traffic to and from each other node, one rule
+// for each; the host, where the workload runs, still reaches it. Turning
+// it off removes only rules that are there.
 func (p *procs) partition(i int, on bool) {
 	n := p.nodes[i]
+	if p.isFault(fmt.Sprintf("partition %d", i), on) {
+		return
+	}
 	op := "-D"
 	if on {
 		op = "-I"
 	}
-	_ = p.root("ip", "netns", "exec", n.ns, "iptables", op, "INPUT", "-s", "10.9.0.0/24", "!", "-s", chaosHost, "-j", "DROP")
-	_ = p.root("ip", "netns", "exec", n.ns, "iptables", op, "OUTPUT", "-d", "10.9.0.0/24", "!", "-d", chaosHost, "-j", "DROP")
+	for j, o := range p.nodes {
+		if j == i {
+			continue
+		}
+		p.faultCmd(p.root("ip", "netns", "exec", n.ns, "iptables", op, "INPUT", "-s", o.addr, "-j", "DROP"))
+		p.faultCmd(p.root("ip", "netns", "exec", n.ns, "iptables", op, "OUTPUT", "-d", o.addr, "-j", "DROP"))
+	}
 }
 
-// delay delays everything node i sends; j does not matter here.
+// delay delays everything node i sends; j does not matter here. A delay
+// of 0 removes a delay that is there.
 func (p *procs) delay(i, _ int, d time.Duration) {
 	n := p.nodes[i]
 	if d == 0 {
-		_ = p.root("ip", "netns", "exec", n.ns, "tc", "qdisc", "del", "dev", "eth0", "root")
+		if !p.isFault(fmt.Sprintf("delay %d", i), false) {
+			p.faultCmd(p.root("ip", "netns", "exec", n.ns, "tc", "qdisc", "del", "dev", "eth0", "root"))
+		}
 		return
 	}
-	_ = p.root("ip", "netns", "exec", n.ns, "tc", "qdisc", "replace", "dev", "eth0", "root", "netem",
-		"delay", strconv.Itoa(int(d.Milliseconds()))+"ms")
+	p.isFault(fmt.Sprintf("delay %d", i), true)
+	p.faultCmd(p.root("ip", "netns", "exec", n.ns, "tc", "qdisc", "replace", "dev", "eth0", "root", "netem",
+		"delay", strconv.Itoa(int(d.Milliseconds()))+"ms"))
 }
 
 func (p *procs) s3Faults(on bool) {
+	if p.isFault("s3", on) {
+		return
+	}
 	op := "unpause"
 	if on {
 		op = "pause"
 	}
-	_ = exec.Command("docker", op, p.s3).Run()
+	if out, err := exec.Command("docker", op, p.s3).CombinedOutput(); err != nil {
+		p.faultCmd(errors.Wrapf(err, "docker %s %s: %s", op, p.s3, out))
+	}
+}
+
+// isFault records that the fault named is on or off, and reports whether
+// it was so already, when there is nothing to do.
+func (p *procs) isFault(name string, on bool) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.faultsOn == nil {
+		p.faultsOn = make(map[string]bool)
+	}
+	was := p.faultsOn[name]
+	p.faultsOn[name] = on
+	return was == on
+}
+
+// faultCmd fails the test if a command that makes or ends a fault failed:
+// the run would count a fault that did not happen.
+func (p *procs) faultCmd(err error) {
+	if err != nil {
+		p.fail("a fault command failed: %v", err)
+	}
 }
 
 func (p *procs) syncFaults(int, bool) bool { return false }

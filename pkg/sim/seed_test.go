@@ -32,8 +32,8 @@ func TestSeed(t *testing.T) {
 	// The run's random stream is the seed's; the generator's own stream
 	// starts from it before anything else draws, so it depends on the seed
 	// alone.
-	rng := rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64()))
-	s3 := fakes3.New(rand.New(rand.NewPCG(rng.Uint64(), rng.Uint64())))
+	rng := seedRand(rand.Uint64(), rand.Uint64())
+	s3 := fakes3.New(rng)
 	s := newScenario(rng, nil)
 	s3Env()
 	ctx := context.Background()
@@ -51,7 +51,7 @@ func TestSeed(t *testing.T) {
 		cpu("cpu-seconds")
 	}()
 
-	c, err := startCluster(ctx, 3, s3, rand.New(rand.NewPCG(rng.Uint64(), rng.Uint64())))
+	c, err := startCluster(ctx, 3, s3, rng)
 	if err != nil {
 		t.Fatalf("starting the cluster: %v", err)
 	}

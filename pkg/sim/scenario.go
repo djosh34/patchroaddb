@@ -119,22 +119,19 @@ func (s *scenario) run(ctx context.Context) error {
 		return errors.Wrap(err, "setup")
 	}
 	s.endPhase("setup")
-	newRNG := func() *rand.Rand { return rand.New(rand.NewPCG(s.rng.Uint64(), s.rng.Uint64())) }
 	until := timeutil.Now().Add(s.runFor)
 	var wg sync.WaitGroup
 	for w := 0; w < s.workers; w++ {
-		wrng := newRNG()
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
-			s.worker(ctx, w, wrng, until)
+			s.worker(ctx, w, s.rng, until)
 		}(w)
 	}
-	frng := newRNG()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		s.faults(frng, until)
+		s.faults(s.rng, until)
 	}()
 	wg.Wait()
 	s.endPhase("workload")
@@ -224,7 +221,44 @@ func (s *scenario) setup(ctx context.Context) error {
 			return errors.Wrapf(err, "%s", st)
 		}
 	}
-	return nil
+	// The PITR check restores to a time during the workload, which needs a
+	// full backup that ends before it.
+	return s.waitFullBackup(ctx, conn)
+}
+
+// openArchive opens the cluster's backup repository in the fake S3.
+func (s *scenario) openArchive(ctx context.Context) (*backup.Store, error) {
+	return backup.OpenStore(ctx, backup.Repository{
+		Bucket: s3Bucket, Prefix: "cluster", Endpoint: s.env.s3Endpoint(), Region: s3Region,
+	})
+}
+
+// waitFullBackup waits until a full backup ends before now. The cluster
+// takes its first full backup when it starts.
+func (s *scenario) waitFullBackup(ctx context.Context, conn *pgx.Conn) error {
+	var ts string
+	if err := conn.QueryRow(ctx, "SELECT cluster_logical_timestamp()::STRING").Scan(&ts); err != nil {
+		return err
+	}
+	now, err := hlc.ParseHLC(ts)
+	if err != nil {
+		return err
+	}
+	store, err := s.openArchive(ctx)
+	if err != nil {
+		return err
+	}
+	deadline := timeutil.Now().Add(2 * time.Minute)
+	for {
+		_, err := backup.CheckTarget(ctx, store, now)
+		if err == nil || !strings.Contains(err.Error(), "no full backup ends at or before") {
+			return nil
+		}
+		if timeutil.Now().After(deadline) {
+			return errors.Wrap(err, "no full backup two minutes after the cluster started")
+		}
+		time.Sleep(time.Second)
+	}
 }
 
 // worker runs random statements against random nodes until the end of the
@@ -248,6 +282,10 @@ func (s *scenario) worker(ctx context.Context, w int, rng *rand.Rand, until time
 			conn = c
 		}
 		op := rng.IntN(10)
+		if op >= 3 && op < 5 && s.queriesFull() {
+			// Enough queries to compare; one more would go uncompared.
+			op = 0
+		}
 		err := timeutil.RunWithTimeout(ctx, "statement", 15*time.Second, func(ctx context.Context) error {
 			switch {
 			case op < 3:
@@ -275,14 +313,25 @@ func (s *scenario) worker(ctx context.Context, w int, rng *rand.Rand, until time
 	}
 }
 
-// keepQuery keeps a comparable query, up to 40, for the check to compare
-// its plans.
+// keepQuery keeps a comparable query for the check to compare its plans.
 func (s *scenario) keepQuery(q query) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if q.comparable && len(s.queries) < 40 {
+	if q.comparable {
 		s.queries = append(s.queries, q)
 	}
+}
+
+// maxQueries is how many comparable queries a seed generates at most: the
+// check compares each, and comparing costs.
+const maxQueries = 40
+
+// queriesFull reports whether the workload has generated maxQueries
+// comparable queries; it generates no more queries then.
+func (s *scenario) queriesFull() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.queries) >= maxQueries
 }
 
 func noHint(table) string { return "" }
@@ -517,7 +566,7 @@ func (s *scenario) compareQueries(ctx context.Context, conn *pgx.Conn) error {
 	for _, q := range s.queries {
 		base, err := queryAt(ctx, conn, ts, nil, q.render(noHint))
 		if err != nil {
-			_ = s.judge(err)
+			s.fail("query failed at %s with the default plan: %s: %v", ts, q.render(noHint), err)
 			continue
 		}
 		for i := 0; i < 2; i++ {
@@ -537,7 +586,7 @@ func (s *scenario) compareQueries(ctx context.Context, conn *pgx.Conn) error {
 			sql := q.render(hint)
 			other, err := queryAt(ctx, conn, ts, settings, sql)
 			if err != nil {
-				_ = s.judge(err)
+				s.fail("query failed at %s with %v: %s: %v", ts, settings, sql, err)
 				continue
 			}
 			s.count("query: compared")
@@ -606,12 +655,23 @@ func (s *scenario) check(ctx context.Context) error {
 // new cluster, and compares every table with the source at that time.
 func (s *scenario) checkPITR(ctx context.Context) error {
 	if s.pitr.IsEmpty() {
-		s.count("pitr: no time recorded")
-		return nil
+		// No worker recorded a time: the time after healing will do.
+		src, err := connect(ctx, s.env.addrs()[0])
+		if err != nil {
+			return err
+		}
+		var ts string
+		err = src.QueryRow(ctx, "SELECT cluster_logical_timestamp()::STRING").Scan(&ts)
+		_ = src.Close(ctx)
+		if err != nil {
+			return err
+		}
+		if s.pitr, err = hlc.ParseHLC(ts); err != nil {
+			return err
+		}
+		s.count("pitr: time after healing")
 	}
-	store, err := backup.OpenStore(ctx, backup.Repository{
-		Bucket: s3Bucket, Prefix: "cluster", Endpoint: s.env.s3Endpoint(), Region: s3Region,
-	})
+	store, err := s.openArchive(ctx)
 	if err != nil {
 		return err
 	}
@@ -620,12 +680,6 @@ func (s *scenario) checkPITR(ctx context.Context) error {
 		_, cerr := backup.CheckTarget(ctx, store, s.pitr)
 		if cerr == nil {
 			break
-		}
-		if strings.Contains(cerr.Error(), "no full backup ends at or before") {
-			// The first full backup ended after the time: there is nothing
-			// to restore to it from.
-			s.count("pitr: time before the first full backup")
-			return nil
 		}
 		if timeutil.Now().After(deadline) {
 			s.fail("the archive does not reach %s five minutes after the workload: %v", s.pitr, cerr)

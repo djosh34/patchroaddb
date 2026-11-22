@@ -26,6 +26,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
+	"github.com/cockroachdb/cockroach/pkg/util/planted"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/jellevandenhooff/gosim/metatesting"
 )
@@ -93,20 +94,22 @@ func runSeed(
 	return o
 }
 
-// hexAddress is a heap address as Go prints a pointer.
-var hexAddress = regexp.MustCompile(`0x[0-9a-f]{6,}`)
+// structPointer is a pointer printed as a struct field, `{0x3202721a2ed8}`.
+// patchroaddb's UnhandledRetryableError prints its kvpb.Error by value,
+// whose fields hold one; the address depends on where the heap put it.
+var structPointer = regexp.MustCompile(`\{0x[0-9a-f]+\}`)
 
 // sameRun reports whether two runs of a seed, by their checksums and logs,
-// are the same run. gosim's checksum covers what the run logs, and a few
-// log lines print a pointer, such as an error struct with %v, whose address
-// depends on where the heap put it. So two runs whose logs are equal but
-// for hex addresses are the same run: every line has its step, machine,
-// goroutine and simulated time, and they all match.
+// are the same run. gosim's checksum covers what the run logs, so a printed
+// pointer makes two equal runs differ. Their logs then differ in that
+// pointer only: every line has its machine, goroutine, simulated time and
+// gosim's step count, which differ too if the runs went apart.
 func sameRun(checksumA, logA, checksumB, logB []byte) bool {
 	if bytes.Equal(checksumA, checksumB) {
 		return true
 	}
-	return bytes.Equal(hexAddress.ReplaceAll(logA, []byte("0x")), hexAddress.ReplaceAll(logB, []byte("0x")))
+	mask := []byte("{0x}")
+	return bytes.Equal(structPointer.ReplaceAll(logA, mask), structPointer.ReplaceAll(logB, mask))
 }
 
 // saveSeed makes out/seed-<seed>/ for a failing seed, with its error and
@@ -305,14 +308,31 @@ func TestReplay(t *testing.T) {
 	}
 }
 
+// plantedChecks is, for each planted bug, the start of the failure that
+// the check meant for it reports. A seed catches the bug only with that
+// failure: another failure, such as a node that loses its store, shows
+// nothing about the bug.
+var plantedChecks = map[string]string{
+	planted.LostSync:      "ledger key ",
+	planted.SkipRefresh:   "the accounts hold ",
+	planted.WrongFilter:   "results differ at ",
+	planted.InternalError: "internal error: ",
+	planted.LostSegment:   "table ",
+}
+
 // TestPlanted runs seeds from SIM_FIRST with the planted bug
-// PATCHROADDB_PLANTED on, at most SIM_COUNT of them, until one fails while
-// the same seed passes without the bug: then the bug counts as caught.
+// PATCHROADDB_PLANTED on, at most SIM_COUNT of them, until one fails with
+// the failure of the check meant for the bug (plantedChecks) while the
+// same seed passes without the bug: then the bug counts as caught.
 func TestPlanted(t *testing.T) {
 	bin := simEnv("SIM_BINARY")
 	bug := simEnv("PATCHROADDB_PLANTED")
 	if bin == "" || bug == "" {
 		skip.IgnoreLint(t, "SIM_BINARY and PATCHROADDB_PLANTED are not set; sim.yml checks the planted bugs")
+	}
+	check, ok := plantedChecks[bug]
+	if !ok {
+		t.Fatalf("no check is known for the planted bug %q", bug)
 	}
 	first, count := envInt(t, "SIM_FIRST", 1), envInt(t, "SIM_COUNT", 20)
 	wall := time.Duration(envInt(t, "SIM_WALL_MINUTES", 5)) * time.Minute
@@ -323,7 +343,11 @@ func TestPlanted(t *testing.T) {
 			t.Logf("%s: seed %d passed", bug, seed)
 			continue
 		}
-		t.Logf("%s: seed %d failed: %s", bug, seed, o.reason)
+		if !failedWith(o.log, check) {
+			t.Logf("%s: seed %d failed, but not with %q: %s", bug, seed, check, o.reason)
+			continue
+		}
+		t.Logf("%s: seed %d failed with %q", bug, seed, check)
 		// A seed that fails without the bug too shows nothing about the
 		// bug; a campaign reports it. The next seed may.
 		// Its logs go apart, not over those of the run with the bug.
@@ -342,6 +366,21 @@ func TestPlanted(t *testing.T) {
 	t.Fatalf("%s: not caught in %d seeds from %d", bug, count, first)
 }
 
+// failedWith reports whether a run's log has a test failure whose message
+// starts with prefix.
+func failedWith(log []byte, prefix string) bool {
+	for _, line := range bytes.Split(log, []byte("\n")) {
+		var m struct {
+			Msg    string `json:"msg"`
+			Method string `json:"method"`
+		}
+		if json.Unmarshal(line, &m) == nil && m.Method == "t.Error" && strings.HasPrefix(m.Msg, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestSameRun(t *testing.T) {
 	// The line that differed between two runs of seed 900.
 	line := func(addr string) []byte {
@@ -352,10 +391,30 @@ func TestSameRun(t *testing.T) {
 		t.Error("logs that differ in an address are not the same run")
 	}
 	other := []byte(`{"step":1814,"machine":"n1","msg":"failed to push during intent resolution: {<nil> 0 {0x32025cd763c8} index:0"}` + "\n")
+	// Hex values other than a struct's pointer count.
+	txn := func(id string) []byte { return []byte(`{"step":1,"msg":"txn ` + id + `"}` + "\n") }
+	if sameRun([]byte{1}, txn("0x3202721a2ed8"), []byte{2}, txn("0x32025cd763c8")) {
+		t.Error("logs that differ in a hex value outside a struct are the same run")
+	}
 	if sameRun([]byte{1}, a, []byte{2}, other) {
 		t.Error("logs that differ in a step are the same run")
 	}
 	if !sameRun([]byte{1}, a, []byte{1}, other) {
 		t.Error("runs with one checksum are not the same run")
+	}
+}
+
+func TestFailedWith(t *testing.T) {
+	log := []byte(`{"msg":"seed summary","method":"t.Logf"}
+{"msg":"results differ at 1579097408.960236209,12:","method":"t.Error","goroutine":16}
+`)
+	if !failedWith(log, plantedChecks[planted.WrongFilter]) {
+		t.Error("the wrong-filter failure is not found")
+	}
+	if failedWith(log, plantedChecks[planted.LostSync]) {
+		t.Error("a ledger failure is found where there is none")
+	}
+	if failedWith(log, "seed summary") {
+		t.Error("a log line counts as a failure")
 	}
 }
