@@ -796,7 +796,7 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 			// The cleaned path, as the engine uses (storage.NewPebble).
 			path := filepath.Clean(spec.Path)
 			location = storage.Filesystem(path)
-			if err := fs.MkdirAllStoreDir(vfs.Default, path, 0755); err != nil {
+			if err := fs.MkdirAllStoreDir(vfs.Default, path, 0755, true /* onDisk */); err != nil {
 				return Engines{}, errors.Wrap(err, "creating store directory")
 			}
 			du, err := vfs.Default.GetDiskUsage(path)

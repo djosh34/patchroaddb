@@ -137,7 +137,7 @@ func maybeEstablishBallast(
 	case currentSizeBytes < ballastSizeBytes && ballastsEnabled:
 		// This can create the store directory and its parents, on a node's
 		// first start: sync what it creates, or a crash can lose the store.
-		if err := storagefs.MkdirAllStoreDir(fs, fs.PathDir(ballastPath), 0755); err != nil {
+		if err := storagefs.MkdirAllStoreDir(fs, fs.PathDir(ballastPath), 0755, storagefs.OnDisk(fs)); err != nil {
 			return false, errors.Wrap(err, "creating data directory")
 		}
 		// We need to either create the ballast or extend the current ballast

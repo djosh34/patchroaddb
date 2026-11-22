@@ -13,6 +13,7 @@ package fs
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/errors/oserror"
@@ -82,13 +83,15 @@ func MkdirAllAndSyncParents(fs vfs.FS, path string, perm os.FileMode) error {
 //
 // It creates the cleaned path: Pebble names a store's files by joining its
 // directory with their names, which cleans it, so that is the directory
-// the store's files go to.
-func MkdirAllStoreDir(fs vfs.FS, path string, perm os.FileMode) error {
+// the store's files go to. With onDisk, fs is the system's filesystem, or
+// wraps it: then the parents synced also include those along the path
+// made absolute and with its symbolic links resolved (dirsToSync).
+func MkdirAllStoreDir(fs vfs.FS, path string, perm os.FileMode, onDisk bool) error {
 	path = filepath.Clean(path)
 	if err := fs.MkdirAll(path, perm); err != nil {
 		return errors.Wrapf(err, "could not create all directories: %s", path)
 	}
-	dirs, err := dirsToSync(fs, path)
+	dirs, err := dirsToSync(fs, path, onDisk)
 	if err != nil {
 		return err
 	}
@@ -103,43 +106,96 @@ func MkdirAllStoreDir(fs vfs.FS, path string, perm os.FileMode) error {
 	return nil
 }
 
-// dirsToSync returns the parents of path and of each of its ancestors, up
-// to the root. On disk, a relative path is first made absolute, and the
-// parents along path with its symbolic links resolved are added: a link's
-// entry is in the directory that holds the link, and the entry of the
-// directory it points to is in that directory's own parent. An in-memory
-// filesystem has no links.
-func dirsToSync(fs vfs.FS, path string) ([]string, error) {
+// OnDisk reports whether fs is the system's filesystem, or wraps it in a way
+// that vfs.Root sees through.
+func OnDisk(fs vfs.FS) bool {
+	return vfs.Root(fs) == vfs.Default
+}
+
+// dirsToSync returns the directories whose entries make path durable: the
+// parent of path and of each of its ancestors, up to the root. On disk, a
+// relative path is first made absolute, and the directories along the path
+// with its symbolic links resolved are added, as are the directories that
+// hold the links on the way: a link's entry is in the directory that holds
+// it. An in-memory filesystem has no links.
+func dirsToSync(fs vfs.FS, path string, onDisk bool) ([]string, error) {
 	var dirs []string
 	seen := make(map[string]bool)
-	add := func(path string) {
-		for dir := path; ; {
+	// add adds dir and each of its ancestors.
+	add := func(dir string) {
+		for {
+			if !seen[dir] {
+				seen[dir] = true
+				dirs = append(dirs, dir)
+			}
 			parent := fs.PathDir(dir)
 			if parent == dir {
 				return
 			}
-			if !seen[parent] {
-				seen[parent] = true
-				dirs = append(dirs, parent)
-			}
 			dir = parent
 		}
 	}
-	if fs != vfs.Default {
-		add(path)
+	if !onDisk {
+		if parent := fs.PathDir(path); parent != path {
+			add(parent)
+		}
 		return dirs, nil
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, errors.Wrapf(err, "making %s absolute", path)
 	}
-	add(abs)
-	resolved, err := filepath.EvalSymlinks(abs)
+	add(filepath.Dir(abs))
+	resolved, linkDirs, err := resolveLinks(abs)
 	if err != nil {
 		return nil, errors.Wrapf(err, "resolving %s", abs)
 	}
-	add(resolved)
+	add(filepath.Dir(resolved))
+	for _, dir := range linkDirs {
+		add(dir)
+	}
 	return dirs, nil
+}
+
+// resolveLinks resolves the symbolic links in the absolute path abs as the
+// system does, one component at a time, and also returns the directories
+// that hold the links it passes.
+func resolveLinks(abs string) (resolved string, linkDirs []string, _ error) {
+	rest := strings.Split(abs, "/")
+	dir := "/"
+	for links := 0; len(rest) > 0; {
+		name := rest[0]
+		rest = rest[1:]
+		switch name {
+		case "", ".":
+			continue
+		case "..":
+			dir = filepath.Dir(dir)
+			continue
+		}
+		next := filepath.Join(dir, name)
+		info, err := os.Lstat(next)
+		if err != nil {
+			return "", nil, err
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			dir = next
+			continue
+		}
+		if links++; links > 255 {
+			return "", nil, errors.Newf("too many symbolic links in %s", abs)
+		}
+		target, err := os.Readlink(next)
+		if err != nil {
+			return "", nil, err
+		}
+		linkDirs = append(linkDirs, dir)
+		if filepath.IsAbs(target) {
+			dir = "/"
+		}
+		rest = append(strings.Split(target, "/"), rest...)
+	}
+	return dir, linkDirs, nil
 }
 
 // syncDir syncs the directory dir.

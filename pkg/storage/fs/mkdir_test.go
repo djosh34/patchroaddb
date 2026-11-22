@@ -185,7 +185,7 @@ func TestMkdirAllStoreDirSurvivesCrash(t *testing.T) {
 
 	t.Run("new", func(t *testing.T) {
 		fs := vfs.NewStrictMem()
-		require.NoError(t, MkdirAllStoreDir(fs, "/a/b/c", os.ModePerm))
+		require.NoError(t, MkdirAllStoreDir(fs, "/a/b/c", os.ModePerm, false /* onDisk */))
 		fs.ResetToSyncedState()
 		_, err := fs.Stat("/a/b/c")
 		require.NoError(t, err)
@@ -193,15 +193,15 @@ func TestMkdirAllStoreDirSurvivesCrash(t *testing.T) {
 	t.Run("unsynced-ancestors", func(t *testing.T) {
 		fs := vfs.NewStrictMem()
 		require.NoError(t, fs.MkdirAll("/a/b", os.ModePerm))
-		require.NoError(t, MkdirAllStoreDir(fs, "/a/b/c", os.ModePerm))
+		require.NoError(t, MkdirAllStoreDir(fs, "/a/b/c", os.ModePerm, false /* onDisk */))
 		fs.ResetToSyncedState()
 		_, err := fs.Stat("/a/b/c")
 		require.NoError(t, err)
 	})
 	t.Run("retry-after-sync-error", func(t *testing.T) {
 		fs := &failOpenDir{MemFS: vfs.NewStrictMem(), dir: "/", err: errors.New("injected EIO"), times: 1}
-		require.Error(t, MkdirAllStoreDir(fs, "/a/b", os.ModePerm))
-		require.NoError(t, MkdirAllStoreDir(fs, "/a/b", os.ModePerm))
+		require.Error(t, MkdirAllStoreDir(fs, "/a/b", os.ModePerm, false /* onDisk */))
+		require.NoError(t, MkdirAllStoreDir(fs, "/a/b", os.ModePerm, false /* onDisk */))
 		fs.ResetToSyncedState()
 		_, err := fs.Stat("/a/b")
 		require.NoError(t, err)
@@ -217,7 +217,7 @@ func TestMkdirAllStoreDirRefusesUnreadableParent(t *testing.T) {
 	mem := vfs.NewStrictMem()
 	require.NoError(t, mem.MkdirAll("/home", os.ModePerm))
 	fs := &failOpenDir{MemFS: mem, dir: "/home", err: os.ErrPermission, times: 1 << 30}
-	err := MkdirAllStoreDir(fs, "/home/data", os.ModePerm)
+	err := MkdirAllStoreDir(fs, "/home/data", os.ModePerm, false /* onDisk */)
 	require.True(t, oserror.IsPermission(err), "%v", err)
 }
 
@@ -228,31 +228,35 @@ func TestMkdirAllStoreDirCleansPath(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	fs := vfs.NewStrictMem()
-	require.NoError(t, MkdirAllStoreDir(fs, "/a/./db/", os.ModePerm))
+	require.NoError(t, MkdirAllStoreDir(fs, "/a/./db/", os.ModePerm, false /* onDisk */))
 	fs.ResetToSyncedState()
 	_, err := fs.Stat("/a/db")
 	require.NoError(t, err)
 }
 
 // TestDirsToSync checks which directories MkdirAllStoreDir syncs on disk:
-// the parents along the path made absolute, and along it with its links
-// resolved.
+// the parents along the path made absolute, along it with its links
+// resolved, and the directories that hold the links on the way.
 func TestDirsToSync(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	tmp, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "disk", "sub", "store"), 0755))
-	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "links"), 0755))
-	require.NoError(t, os.Symlink(filepath.Join(tmp, "disk", "sub"), filepath.Join(tmp, "links", "link")))
+	// links/first -> ../middle/second, middle/second -> ../disk/sub.
+	for _, dir := range []string{"links", "middle", "disk/sub/store"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(tmp, dir), 0755))
+	}
+	require.NoError(t, os.Symlink("../middle/second", filepath.Join(tmp, "links", "first")))
+	require.NoError(t, os.Symlink("../disk/sub", filepath.Join(tmp, "middle", "second")))
 
-	dirs, err := dirsToSync(vfs.Default, filepath.Join(tmp, "links", "link", "store"))
+	dirs, err := dirsToSync(vfs.Default, filepath.Join(tmp, "links", "first", "store"), true /* onDisk */)
 	require.NoError(t, err)
 	for _, want := range []string{
-		filepath.Join(tmp, "links", "link"), // the entry of store, through the link
-		filepath.Join(tmp, "links"),         // the entry of the link
-		filepath.Join(tmp, "disk", "sub"),   // the entry of store on disk
-		filepath.Join(tmp, "disk"),          // the entry of sub
+		filepath.Join(tmp, "links", "first"), // the entry of store, through the links
+		filepath.Join(tmp, "links"),          // the entry of first
+		filepath.Join(tmp, "middle"),         // the entry of second
+		filepath.Join(tmp, "disk", "sub"),    // the entry of store on disk
+		filepath.Join(tmp, "disk"),           // the entry of sub
 		tmp, "/",
 	} {
 		require.Contains(t, dirs, want)
@@ -262,7 +266,7 @@ func TestDirsToSync(t *testing.T) {
 	// directory are synced too.
 	wd, err := os.Getwd()
 	require.NoError(t, err)
-	dirs, err = dirsToSync(vfs.Default, ".")
+	dirs, err = dirsToSync(vfs.Default, ".", true /* onDisk */)
 	require.NoError(t, err)
 	require.Contains(t, dirs, filepath.Dir(wd))
 }
