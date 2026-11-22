@@ -56,17 +56,33 @@ func MkdirAllAndSyncParents(fs vfs.FS, path string, perm os.FileMode) error {
 	}
 
 	// Sync parent directories up to the lowest existing ancestor, included.
+	// If one fails, remove the directories this call created, which are
+	// still empty: a retry would find them there, skip the sync, and their
+	// entries could be lost in a crash.
 	for dir, parent := path, ""; dir != exists; dir = parent {
 		parent = fs.PathDir(dir)
-		if handle, err := fs.OpenDir(parent); err != nil {
-			return errors.Wrapf(err, "could not open parent dir: %s", parent)
-		} else if err := handle.Sync(); err != nil {
-			_ = handle.Close()
-			return errors.Wrapf(err, "could not sync parent dir: %s", parent)
-		} else if err := handle.Close(); err != nil {
-			return errors.Wrapf(err, "could not close parent dir: %s", parent)
+		if err := syncDir(fs, parent); err != nil {
+			for created := path; created != exists; created = fs.PathDir(created) {
+				if rmErr := fs.Remove(created); rmErr != nil {
+					return errors.CombineErrors(err, rmErr)
+				}
+			}
+			return err
 		}
 	}
 
 	return nil
+}
+
+// syncDir syncs the directory dir.
+func syncDir(fs vfs.FS, dir string) error {
+	handle, err := fs.OpenDir(dir)
+	if err != nil {
+		return errors.Wrapf(err, "could not open parent dir: %s", dir)
+	}
+	if err := handle.Sync(); err != nil {
+		_ = handle.Close()
+		return errors.Wrapf(err, "could not sync parent dir: %s", dir)
+	}
+	return errors.Wrapf(handle.Close(), "could not close parent dir: %s", dir)
 }

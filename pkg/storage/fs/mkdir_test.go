@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
+	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/errors/oserror"
 	"github.com/cockroachdb/pebble/vfs"
 	"github.com/stretchr/testify/assert"
@@ -156,4 +157,33 @@ func TestMkdirAllAndSyncParentsErrors(t *testing.T) {
 			require.ErrorContains(t, MkdirAllAndSyncParents(fs, path, os.ModePerm), "not a directory")
 		}
 	})
+}
+
+// failOpenDirOnce fails the first OpenDir of dir.
+type failOpenDirOnce struct {
+	*vfs.MemFS
+	dir    string
+	failed bool
+}
+
+func (fs *failOpenDirOnce) OpenDir(name string) (vfs.File, error) {
+	if name == fs.dir && !fs.failed {
+		fs.failed = true
+		return nil, errors.New("injected EIO")
+	}
+	return fs.MemFS.OpenDir(name)
+}
+
+// TestMkdirAllAndSyncParentsRetryAfterSyncError checks that a call that
+// failed to sync a parent does not leave its new directories behind: a
+// retry must create and sync them again.
+func TestMkdirAllAndSyncParentsRetryAfterSyncError(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	fs := &failOpenDirOnce{MemFS: vfs.NewStrictMem(), dir: "/"}
+	require.Error(t, MkdirAllAndSyncParents(fs, "/data", os.ModePerm))
+	require.NoError(t, MkdirAllAndSyncParents(fs, "/data", os.ModePerm))
+	fs.ResetToSyncedState()
+	_, err := fs.Stat("/data")
+	require.NoError(t, err)
 }
