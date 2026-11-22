@@ -35,27 +35,6 @@ import (
 // TODO(pavelkalinnikov): have a type-safe canonical path type which can be
 // iterated without thinking about . and .. placeholders.
 func MkdirAllAndSyncParents(fs vfs.FS, path string, perm os.FileMode) error {
-	return mkdirAllAndSyncParents(fs, path, perm, false /* undo */)
-}
-
-// MkdirAllStoreDir is MkdirAllAndSyncParents for a store directory, or a
-// directory in it, on a node's start. If a sync fails, it also removes the
-// directories it created, which are still empty: a retry, or the next
-// start, would find them there and skip their sync, and a crash could then
-// lose the store. Nothing else may create those directories meanwhile, as
-// holds on start, when the store directories are created one at a time.
-//
-// The path must be clean, as the CLI makes store paths: with "..", "." or
-// a trailing separator, the directories it walks to sync and remove would
-// not be the ones MkdirAll creates.
-func MkdirAllStoreDir(fs vfs.FS, path string, perm os.FileMode) error {
-	if filepath.Clean(path) != path {
-		return errors.Newf("store directory %q is not a clean path", path)
-	}
-	return mkdirAllAndSyncParents(fs, path, perm, true /* undo */)
-}
-
-func mkdirAllAndSyncParents(fs vfs.FS, path string, perm os.FileMode, undo bool) error {
 	// Find the lowest existing directory in the hierarchy.
 	var exists string
 	for dir, parent := path, ""; ; dir = parent {
@@ -80,31 +59,58 @@ func mkdirAllAndSyncParents(fs vfs.FS, path string, perm os.FileMode, undo bool)
 	// Sync parent directories up to the lowest existing ancestor, included.
 	for dir, parent := path, ""; dir != exists; dir = parent {
 		parent = fs.PathDir(dir)
-		if err := syncDir(fs, parent); err != nil {
-			if !undo {
-				return err
-			}
-			for created := path; created != exists; created = fs.PathDir(created) {
-				if rmErr := fs.Remove(created); rmErr != nil {
-					return errors.CombineErrors(err, rmErr)
-				}
-			}
-			return err
+		if handle, err := fs.OpenDir(parent); err != nil {
+			return errors.Wrapf(err, "could not open parent dir: %s", parent)
+		} else if err := handle.Sync(); err != nil {
+			_ = handle.Close()
+			return errors.Wrapf(err, "could not sync parent dir: %s", parent)
+		} else if err := handle.Close(); err != nil {
+			return errors.Wrapf(err, "could not close parent dir: %s", parent)
 		}
 	}
 
 	return nil
 }
 
+// MkdirAllStoreDir creates a store directory, or a directory in it, on a
+// node's start, and makes it durable: it syncs the parent of the directory
+// and of each of its ancestors, up to the root. Whether an ancestor's entry
+// is durable cannot be told from its being there: an earlier start may have
+// created it and stopped before its sync, and a crash would then lose the
+// store. A parent that cannot be opened for lack of permission is skipped:
+// it was not created by the node, which creates directories it can read.
+//
+// The path must be clean, as the CLI makes store paths: with "..", "." or
+// a trailing separator, the directories it syncs would not be the ones
+// MkdirAll creates.
+func MkdirAllStoreDir(fs vfs.FS, path string, perm os.FileMode) error {
+	if filepath.Clean(path) != path {
+		return errors.Newf("store directory %q is not a clean path", path)
+	}
+	if err := fs.MkdirAll(path, perm); err != nil {
+		return errors.Wrapf(err, "could not create all directories: %s", path)
+	}
+	for dir := path; ; {
+		parent := fs.PathDir(dir)
+		if parent == dir {
+			return nil
+		}
+		if err := syncDir(fs, parent); err != nil && !oserror.IsPermission(err) {
+			return err
+		}
+		dir = parent
+	}
+}
+
 // syncDir syncs the directory dir.
 func syncDir(fs vfs.FS, dir string) error {
 	handle, err := fs.OpenDir(dir)
 	if err != nil {
-		return errors.Wrapf(err, "could not open parent dir: %s", dir)
+		return errors.Wrapf(err, "could not open dir: %s", dir)
 	}
 	if err := handle.Sync(); err != nil {
 		_ = handle.Close()
-		return errors.Wrapf(err, "could not sync parent dir: %s", dir)
+		return errors.Wrapf(err, "could not sync dir: %s", dir)
 	}
-	return errors.Wrapf(handle.Close(), "could not close parent dir: %s", dir)
+	return errors.Wrapf(handle.Close(), "could not close dir: %s", dir)
 }

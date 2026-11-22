@@ -262,23 +262,9 @@ func TestReplay(t *testing.T) {
 		}
 		return res
 	}
-	// write saves a run's log as name, and its artifacts, such as the
-	// stacks of a run that passed its real time, beside it.
 	write := func(name string, res *metatesting.RunResult) {
-		if out == "" {
-			return
-		}
-		if err := os.MkdirAll(out, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(out, name), readableLog(res.LogOutput), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		for artifact, data := range res.Artifacts {
-			path := filepath.Join(out, strings.TrimSuffix(name, ".txt")+"-"+filepath.Base(artifact))
-			if err := os.WriteFile(path, data, 0o644); err != nil {
-				t.Fatal(err)
-			}
+		if out != "" {
+			writeRun(t, out, name, res)
 		}
 	}
 	first := run()
@@ -292,6 +278,23 @@ func TestReplay(t *testing.T) {
 	}
 	if first.Failed {
 		t.Errorf("seed %d failed: %s", seed, first.Err)
+	}
+}
+
+// writeRun saves a run's log in out as name, and its artifacts, such as the
+// stacks of a run that passed its real time, beside it.
+func writeRun(t *testing.T, out, name string, res *metatesting.RunResult) {
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(out, name), readableLog(res.LogOutput), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for artifact, data := range res.Artifacts {
+		path := filepath.Join(out, strings.TrimSuffix(name, ".txt")+"-"+filepath.Base(artifact))
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -310,20 +313,7 @@ func TestFirstStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out := simEnv("SIM_OUT"); out != "" && (res.Failed || res.Ended) {
-		if err := os.MkdirAll(out, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(out, "first-start.txt"), readableLog(res.LogOutput), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		// Such as the stack of every goroutine of a run that ran out of
-		// real time.
-		for name, data := range res.Artifacts {
-			path := filepath.Join(out, "first-start-"+filepath.Base(name))
-			if err := os.WriteFile(path, data, 0o644); err != nil {
-				t.Fatal(err)
-			}
-		}
+		writeRun(t, out, "first-start.txt", res)
 	}
 	if res.Failed || res.Ended {
 		t.Errorf("TestFirstStartPowerLoss failed: %s", res.Err)

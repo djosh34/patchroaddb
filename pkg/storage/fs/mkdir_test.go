@@ -159,37 +159,63 @@ func TestMkdirAllAndSyncParentsErrors(t *testing.T) {
 	})
 }
 
-// failOpenDirOnce fails the first OpenDir of dir.
-type failOpenDirOnce struct {
+// failOpenDir fails OpenDir of dir with err, at most times times.
+type failOpenDir struct {
 	*vfs.MemFS
-	dir    string
-	failed bool
+	dir   string
+	err   error
+	times int
 }
 
-func (fs *failOpenDirOnce) OpenDir(name string) (vfs.File, error) {
-	if name == fs.dir && !fs.failed {
-		fs.failed = true
-		return nil, errors.New("injected EIO")
+func (fs *failOpenDir) OpenDir(name string) (vfs.File, error) {
+	if name == fs.dir && fs.times > 0 {
+		fs.times--
+		return nil, fs.err
 	}
 	return fs.MemFS.OpenDir(name)
 }
 
-// TestMkdirAllStoreDirRetryAfterSyncError checks that a call that failed
-// to sync a parent does not leave its new directories behind: a retry must
-// create and sync them again.
-func TestMkdirAllStoreDirRetryAfterSyncError(t *testing.T) {
+// TestMkdirAllStoreDirSurvivesCrash checks that MkdirAllStoreDir makes the
+// directory durable however its ancestors came to be: created by this
+// call, left unsynced by another, or by an earlier call that failed to
+// sync them.
+func TestMkdirAllStoreDirSurvivesCrash(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	for _, path := range []string{"/data", "/a/b"} {
-		t.Run(path, func(t *testing.T) {
-			fs := &failOpenDirOnce{MemFS: vfs.NewStrictMem(), dir: "/"}
-			require.Error(t, MkdirAllStoreDir(fs, path, os.ModePerm))
-			require.NoError(t, MkdirAllStoreDir(fs, path, os.ModePerm))
-			fs.ResetToSyncedState()
-			_, err := fs.Stat(path)
-			require.NoError(t, err)
-		})
-	}
+	t.Run("new", func(t *testing.T) {
+		fs := vfs.NewStrictMem()
+		require.NoError(t, MkdirAllStoreDir(fs, "/a/b/c", os.ModePerm))
+		fs.ResetToSyncedState()
+		_, err := fs.Stat("/a/b/c")
+		require.NoError(t, err)
+	})
+	t.Run("unsynced-ancestors", func(t *testing.T) {
+		fs := vfs.NewStrictMem()
+		require.NoError(t, fs.MkdirAll("/a/b", os.ModePerm))
+		require.NoError(t, MkdirAllStoreDir(fs, "/a/b/c", os.ModePerm))
+		fs.ResetToSyncedState()
+		_, err := fs.Stat("/a/b/c")
+		require.NoError(t, err)
+	})
+	t.Run("retry-after-sync-error", func(t *testing.T) {
+		fs := &failOpenDir{MemFS: vfs.NewStrictMem(), dir: "/", err: errors.New("injected EIO"), times: 1}
+		require.Error(t, MkdirAllStoreDir(fs, "/a/b", os.ModePerm))
+		require.NoError(t, MkdirAllStoreDir(fs, "/a/b", os.ModePerm))
+		fs.ResetToSyncedState()
+		_, err := fs.Stat("/a/b")
+		require.NoError(t, err)
+	})
+}
+
+// TestMkdirAllStoreDirSkipsUnreadableParent checks that a parent the node
+// may not open, which it did not create, does not fail the call.
+func TestMkdirAllStoreDirSkipsUnreadableParent(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	mem := vfs.NewStrictMem()
+	require.NoError(t, mem.MkdirAll("/home", os.ModePerm))
+	fs := &failOpenDir{MemFS: mem, dir: "/home", err: os.ErrPermission, times: 1 << 30}
+	require.NoError(t, MkdirAllStoreDir(fs, "/home/data", os.ModePerm))
 }
 
 // TestMkdirAllStoreDirRefusesUncleanPath checks that MkdirAllStoreDir
