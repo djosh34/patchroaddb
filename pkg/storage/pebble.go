@@ -848,7 +848,7 @@ func wrapFilesystemMiddleware(opts *pebble.Options) (vfs.FS, io.Closer) {
 	fs = vfs.OnDiskFull(fs, func() {
 		exit.WithCode(exit.DiskFull())
 	})
-	return fs, closer
+	return markerSyncFS{FS: fs}, closer
 }
 
 // PebbleConfig holds all configuration parameters and knobs used in setting up
