@@ -1778,6 +1778,8 @@ func (rpcCtx *Context) dialOptsCommon(
 	// was not yet put on the wire when the error occurred). So we should
 	// consider this one a no-op, though it can't hurt.
 	dialOpts = append(dialOpts, grpc.WithDisableRetry())
+	// The simulator (pkg/sim) needs transparent retries to wait.
+	dialOpts = append(dialOpts, simDialOptions()...)
 
 	// Configure the window sizes with optional env var overrides.
 	dialOpts = append(dialOpts, grpc.WithInitialConnWindowSize(rpcCtx.initialConnWindowSize(ctx)))
