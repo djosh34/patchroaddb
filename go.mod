@@ -312,4 +312,4 @@ tool (
 	honnef.co/go/tools/cmd/staticcheck
 )
 
-replace github.com/jellevandenhooff/gosim => github.com/djosh34/gosim v0.0.0-20261122052913-8144caa8361d
+replace github.com/jellevandenhooff/gosim => github.com/djosh34/gosim v0.0.0-20261122054344-838356e553e4
