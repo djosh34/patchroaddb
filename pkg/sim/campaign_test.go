@@ -268,9 +268,8 @@ func TestReplay(t *testing.T) {
 }
 
 // TestPlanted runs seeds from SIM_FIRST with the planted bug
-// PATCHROADDB_PLANTED on, at most SIM_COUNT of them, until one fails. The
-// bug counts as caught when a seed fails with it and the same seed passes
-// without it.
+// PATCHROADDB_PLANTED on, at most SIM_COUNT of them, until one fails while
+// the same seed passes without the bug: then the bug counts as caught.
 func TestPlanted(t *testing.T) {
 	bin := simEnv("SIM_BINARY")
 	bug := simEnv("PATCHROADDB_PLANTED")
@@ -287,9 +286,12 @@ func TestPlanted(t *testing.T) {
 			continue
 		}
 		t.Logf("%s: seed %d failed: %s", bug, seed, o.reason)
+		// A seed that fails without the bug too shows nothing about the
+		// bug; a campaign reports it. The next seed may.
 		without := runSeed(t, bin, seed, "", wall, out)
 		if without.failed {
-			t.Fatalf("%s: seed %d fails without the bug too: %s", bug, seed, without.reason)
+			t.Logf("%s: seed %d fails without the bug too: %s", bug, seed, without.reason)
+			continue
 		}
 		t.Logf("%s: caught by seed %d, which passes without it", bug, seed)
 		return
