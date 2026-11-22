@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -233,6 +234,8 @@ func TestReplay(t *testing.T) {
 		}
 		return res
 	}
+	// write saves a run's log as name, and its artifacts, such as the
+	// stacks of a run that passed its real time, beside it.
 	write := func(name string, res *metatesting.RunResult) {
 		if out == "" {
 			return
@@ -242,6 +245,12 @@ func TestReplay(t *testing.T) {
 		}
 		if err := os.WriteFile(filepath.Join(out, name), readableLog(res.LogOutput), 0o644); err != nil {
 			t.Fatal(err)
+		}
+		for artifact, data := range res.Artifacts {
+			path := filepath.Join(out, strings.TrimSuffix(name, ".txt")+"-"+filepath.Base(artifact))
+			if err := os.WriteFile(path, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	first := run()
