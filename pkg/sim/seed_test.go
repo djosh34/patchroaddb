@@ -37,17 +37,25 @@ func TestSeed(t *testing.T) {
 	s := newScenario(rng, nil)
 	s3Env()
 	ctx := context.Background()
+	// cpu writes the CPU time since the start as the artifact name. The
+	// value differs between runs, so it goes to an artifact, never to the
+	// log or the run.
+	cpu := func(name string) {
+		if cpu1, err := gosim.CPUTime(); err == nil {
+			gosim.WriteArtifact(name, []byte(fmt.Sprintf("%.3f", (cpu1-cpu0).Seconds())))
+		}
+	}
+	s.phase = func(name string) { cpu("cpu-seconds-after-" + name) }
 	defer func() {
 		t.Logf("seed summary:\n%s", s.report())
-		if cpu1, err := gosim.CPUTime(); err == nil {
-			gosim.WriteArtifact("cpu-seconds", []byte(fmt.Sprintf("%.3f", (cpu1-cpu0).Seconds())))
-		}
+		cpu("cpu-seconds")
 	}()
 
 	c, err := startCluster(ctx, 3, s3)
 	if err != nil {
 		t.Fatalf("starting the cluster: %v", err)
 	}
+	s.phase("start")
 	s.env = c
 	if err := s.run(ctx); err != nil {
 		t.Error(err)

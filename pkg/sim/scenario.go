@@ -81,6 +81,9 @@ type scenario struct {
 	queries []query
 	// stats count what the workload did, for the log.
 	stats map[string]int
+	// phase, if set, is called as each phase of run ends, with its name,
+	// to measure what the phase cost.
+	phase func(name string)
 }
 
 const bankTotal = 1000
@@ -108,6 +111,7 @@ func (s *scenario) run(ctx context.Context) error {
 	if err := s.setup(ctx); err != nil {
 		return errors.Wrap(err, "setup")
 	}
+	s.endPhase("setup")
 	newRNG := func() *rand.Rand { return rand.New(rand.NewPCG(s.rng.Uint64(), s.rng.Uint64())) }
 	until := timeutil.Now().Add(s.runFor)
 	var wg sync.WaitGroup
@@ -126,6 +130,7 @@ func (s *scenario) run(ctx context.Context) error {
 		s.faults(frng, until)
 	}()
 	wg.Wait()
+	s.endPhase("workload")
 
 	if err := s.heal(ctx); err != nil {
 		return errors.Wrap(err, "after the faults")
@@ -133,10 +138,18 @@ func (s *scenario) run(ctx context.Context) error {
 	if err := s.check(ctx); err != nil {
 		return errors.Wrap(err, "check")
 	}
+	s.endPhase("check")
 	if err := s.checkPITR(ctx); err != nil {
 		return errors.Wrap(err, "PITR check")
 	}
+	s.endPhase("pitr")
 	return nil
+}
+
+func (s *scenario) endPhase(name string) {
+	if s.phase != nil {
+		s.phase(name)
+	}
 }
 
 func (s *scenario) fail(format string, args ...any) {
