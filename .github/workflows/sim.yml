@@ -99,6 +99,8 @@ jobs:
         env:
           PLANTED: ${{ inputs.planted == 'all' && '1' || '' }}
           GOSIM_TRANSLATE_WORKERS: "8"
+          # gosim keeps its translations in SQLite, through cgo.
+          CGO_ENABLED: "1"
       - if: always()
         uses: actions/cache/save@v4
         with:
@@ -174,7 +176,9 @@ jobs:
         with:
           pattern: sim-out-*
           path: out
-      - run: build/sim-summary.sh out ${{ inputs.first }} ${{ inputs.seeds }} | tee -a "$GITHUB_STEP_SUMMARY"
+      - run: |
+          set -o pipefail
+          build/sim-summary.sh out ${{ inputs.first }} ${{ inputs.seeds }} | tee -a "$GITHUB_STEP_SUMMARY"
 
   planted:
     if: inputs.planted == 'all'
