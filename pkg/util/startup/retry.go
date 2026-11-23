@@ -110,7 +110,8 @@ func WithoutChecks(ctx context.Context) context.Context {
 }
 
 // RunIdempotentWithRetry synchronously runs a function with retry of circuit
-// breaker errors on startup. Since we retry ambiguous errors unconditionally,
+// breaker errors, ambiguous results and lost DistSQL connections on startup
+// (isRetryableStartupError). Since we retry ambiguous errors unconditionally,
 // operations should be idempotent by nature. If this is not possible, then
 // retry should be performed explicitly while using WithoutChecks context
 // to suppress safety mechanisms.
