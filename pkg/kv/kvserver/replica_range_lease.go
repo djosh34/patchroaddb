@@ -534,27 +534,19 @@ func (p *pendingLeaseRequest) requestLease(
 		}
 	}
 
-	// An epoch-based lease ends when its liveness record expires, so a lease
-	// request cannot extend it: when this store's own epoch lease is in its
-	// stasis period, the request applies the same lease, which stays unusable,
-	// and the caller asks again at once, without waiting, until the liveness
-	// heartbeat loop catches up. Heartbeat the liveness record here instead, as
-	// for an expired lease below, so that the lease is extended.
-	if extension && status.Lease.Type() == roachpb.LeaseEpoch &&
-		reqLease.Type() == roachpb.LeaseEpoch && status.State == kvserverpb.LeaseState_UNUSABLE {
-		if err := p.repl.store.cfg.NodeLiveness.Heartbeat(ctx, status.Liveness); err != nil {
-			if logFailedHeartbeatOwnLiveness.ShouldLog() {
-				log.Errorf(ctx, "failed to heartbeat own liveness record: %s", err)
-			}
-			return kvpb.NewNotLeaseHolderError(roachpb.Lease{}, p.repl.store.StoreID(), p.repl.Desc(),
-				fmt.Sprintf("failed to manipulate liveness record: %s", err))
-		}
-	}
-
 	// If we're replacing an expired epoch-based lease, we must increment the
 	// epoch of the prior owner to invalidate its leases. If we were the owner,
 	// then we instead heartbeat to become live.
-	if status.Lease.Type() == roachpb.LeaseEpoch && status.State == kvserverpb.LeaseState_EXPIRED {
+	//
+	// We also heartbeat when we extend our own epoch-based lease in its stasis
+	// period. Such a lease ends when its liveness record expires, so a lease
+	// request alone would apply the same lease, which stays unusable, and the
+	// caller would ask again at once, without waiting, until the liveness
+	// heartbeat loop caught up.
+	stasisExtension := extension && status.State == kvserverpb.LeaseState_UNUSABLE &&
+		reqLease.Type() == roachpb.LeaseEpoch
+	if status.Lease.Type() == roachpb.LeaseEpoch &&
+		(status.State == kvserverpb.LeaseState_EXPIRED || stasisExtension) {
 		var err error
 		// If this replica is previous & next lease holder, manually heartbeat to become live.
 		if extension {
