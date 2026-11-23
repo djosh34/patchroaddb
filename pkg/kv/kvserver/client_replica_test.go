@@ -2054,6 +2054,10 @@ func TestEpochLeaseInStasisIsExtended(t *testing.T) {
 	manualClock.Pause()
 	stasis := pre.Expiration.WallTime - clock.MaxOffset().Nanoseconds()
 	manualClock.Increment(stasis + 10 - manualClock.UnixNano())
+	// The clock cannot go back, so check that the lease is in stasis, not
+	// already expired: an expired lease took another path, which heartbeat
+	// before the fix too.
+	require.Equal(t, kvserverpb.LeaseState_UNUSABLE, repl.CurrentLeaseStatus(ctx).State)
 
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
