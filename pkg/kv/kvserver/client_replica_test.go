@@ -2034,6 +2034,9 @@ func TestEpochLeaseInStasisIsExtended(t *testing.T) {
 	repl := store.LookupReplica(roachpb.RKey(key))
 	_, pErr := kv.SendWrapped(ctx, store.TestSender(), getArgs(key))
 	require.NoError(t, pErr.GoError())
+	// A range that is split off can start with an expiration-based lease, which
+	// is upgraded to an epoch-based one in the background.
+	tc.WaitForLeaseUpgrade(ctx, t, *repl.Desc())
 	lease, _ := repl.GetLease()
 	require.Equal(t, roachpb.LeaseEpoch, lease.Type())
 
