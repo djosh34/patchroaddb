@@ -235,11 +235,12 @@ jobs:
           # fail a seed first: it takes more seeds.
           - {bug: lost-sync, budget: 60}
           - {bug: skip-refresh, budget: 30}
-          # A seed catches this bug only when it compares a >= filter on
-          # an unindexed integer column under another plan. Five runs from
-          # seeds 1, 131, 231, 331 and 431 first caught it after 90, 7, 2,
-          # 8 and 3 seeds (#59, run 45240892872): about one seed in 22, so
-          # 150 seeds miss it about one time in a thousand.
+          # A seed catches this bug only when one plan runs an integer >=
+          # (or BETWEEN) as a vectorized filter, and drops a row equal to
+          # its bound that the plan it is compared with returns. Seeds 1 to
+          # 30 missed it (run 45223056299); runs from seeds 31, 131, 231,
+          # 331 and 431 first caught it at seeds 90, 137, 232, 338 and 433
+          # (run 45240892872).
           - {bug: wrong-filter, budget: 150}
           - {bug: internal-error, budget: 30}
           - {bug: lost-segment, budget: 30}
