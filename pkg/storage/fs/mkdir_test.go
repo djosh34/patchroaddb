@@ -281,3 +281,16 @@ func TestDirsToSync(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, dirs, filepath.Dir(wd))
 }
+
+// TestMkdirAllStoreDirRelativeInMemory checks a relative path on an
+// in-memory filesystem, which has no working directory: the root, "", is
+// synced in its place.
+func TestMkdirAllStoreDirRelativeInMemory(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	fs := vfs.NewStrictMem()
+	require.NoError(t, MkdirAllStoreDir(fs, "auxiliary", os.ModePerm, false /* onDisk */))
+	fs.ResetToSyncedState()
+	_, err := fs.Stat("auxiliary")
+	require.NoError(t, err)
+}

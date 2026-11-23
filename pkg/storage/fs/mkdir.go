@@ -123,6 +123,17 @@ func dirsToSync(fs vfs.FS, path string, onDisk bool) ([]string, error) {
 		var dirs []string
 		for dir := path; ; {
 			parent := fs.PathDir(dir)
+			if parent == "." {
+				// The working directory, of a relative path. An in-memory
+				// filesystem has none: there a relative path is under the
+				// root, "".
+				if _, err := fs.Stat("."); oserror.IsNotExist(err) {
+					parent = ""
+				} else if err != nil {
+					return nil, err
+				}
+				return append(dirs, parent), nil
+			}
 			if parent == dir {
 				return dirs, nil
 			}
