@@ -78,3 +78,60 @@ func TestMarkerMoveInMemoryRoot(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"marker.format-version.000002.002"}, files)
 }
+
+// crashOnMarkerCreateFS, once armed, crashes when a marker file is created,
+// and of what was not synced keeps only that creation: a filesystem that
+// reorders directory updates may persist the marker's entry alone.
+type crashOnMarkerCreateFS struct {
+	*vfs.MemFS
+	armed bool
+}
+
+func (fs *crashOnMarkerCreateFS) Create(name string) (vfs.File, error) {
+	if !fs.armed || !strings.HasPrefix(fs.PathBase(name), "marker.") {
+		return fs.MemFS.Create(name)
+	}
+	fs.armed = false
+	fs.ResetToSyncedState()
+	f, err := fs.MemFS.Create(name)
+	if err != nil {
+		return nil, err
+	}
+	dir, err := fs.MemFS.OpenDir(fs.PathDir(name))
+	if err != nil {
+		return nil, err
+	}
+	if err := dir.Sync(); err != nil {
+		return nil, err
+	}
+	return f, dir.Close()
+}
+
+// TestMarkerNamesDurableFile checks that a crash when Pebble creates a new
+// manifest marker cannot leave the marker without the MANIFEST it names,
+// which Pebble created just before and whose entry it had not synced.
+func TestMarkerNamesDurableFile(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	mem := &crashOnMarkerCreateFS{MemFS: vfs.NewStrictMem()}
+	fs := markerSyncFS{FS: mem, dir: "/"}
+	m, _, err := atomicfs.LocateMarker(fs, "/", "manifest")
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	f, err := fs.Create("/MANIFEST-000002")
+	require.NoError(t, err)
+	_, err = f.Write([]byte("manifest"))
+	require.NoError(t, err)
+	require.NoError(t, f.Sync())
+	require.NoError(t, f.Close())
+
+	mem.armed = true
+	require.NoError(t, m.Move("MANIFEST-000002"))
+
+	value, err := atomicfs.ReadMarker(mem, "/", "manifest")
+	require.NoError(t, err)
+	require.Equal(t, "MANIFEST-000002", value)
+	_, err = mem.Stat("/MANIFEST-000002")
+	require.NoError(t, err)
+}
