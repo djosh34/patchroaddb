@@ -1086,9 +1086,9 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (p *Pebble, err error) {
 	// mkdir makes the store and auxiliary directories durable: a store
 	// directory whose entry is lost in a crash loses the whole store. It
 	// works through the wrapped filesystem, with its disk-stall and ENOSPC
-	// handling. An in-memory filesystem has no current directory, so a
-	// relative path there has no parent to sync; then mkdir only creates
-	// them.
+	// handling. A relative path on an in-memory filesystem, which has no
+	// current directory, is only created: MkdirAllStoreDir cleans the
+	// path, and the root, "", would become a directory named ".".
 	mkdir := func(dir string, perm os.FileMode) error {
 		return fs.MkdirAllStoreDir(opts.FS, dir, perm, onDisk)
 	}
