@@ -236,11 +236,12 @@ jobs:
           - {bug: lost-sync, budget: 60}
           - {bug: skip-refresh, budget: 30}
           # A seed catches this bug only when one plan runs an integer >=
-          # (or BETWEEN) as a vectorized filter, and drops a row equal to
-          # its bound that the plan it is compared with returns. Seeds 1 to
-          # 30 missed it (run 45223056299); runs from seeds 31, 131, 231,
-          # 331 and 431 first caught it at seeds 90, 137, 232, 338 and 433
-          # (run 45240892872).
+          # (or BETWEEN) as a vectorized filter and drops a row equal to its
+          # bound, which changes the result against the plan it is compared
+          # with (the rows, or an aggregate over them). Seeds 1 to 30
+          # missed it (run 45223056299); runs from seeds 31, 131, 231, 331
+          # and 431 first caught it at seeds 90, 137, 232, 338 and 433 (run
+          # 45240892872).
           - {bug: wrong-filter, budget: 150}
           - {bug: internal-error, budget: 30}
           - {bug: lost-segment, budget: 30}
