@@ -2007,6 +2007,59 @@ func TestTxnWriteTimestampInLeaseStasis(t *testing.T) {
 	require.True(t, preLease.Expiration.Less(*postLease.Expiration), "expected extension")
 }
 
+// TestEpochLeaseInStasisIsExtended sends a request while the store's own
+// epoch lease is in its stasis period, with the clock paused and the
+// liveness heartbeat loop off. An epoch lease is extended by its liveness
+// record, so a lease request alone applies the same lease again and leaves
+// it unusable. Before, the request asked for the lease again and again
+// without waiting, until its lease acquisition timed out. A campaign seed
+// that spun this way stopped the simulated clock.
+func TestEpochLeaseInStasisIsExtended(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	ctx := context.Background()
+	manualClock := hlc.NewHybridManualClock()
+	tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{
+		ReplicationMode: base.ReplicationManual,
+		ServerArgs: base.TestServerArgs{
+			Knobs: base.TestingKnobs{
+				Store:  &kvserver.StoreTestingKnobs{DisableAutomaticLeaseRenewal: true},
+				Server: &server.TestingKnobs{WallClock: manualClock},
+			},
+		},
+	})
+	defer tc.Stopper().Stop(ctx)
+	key := tc.ScratchRange(t)
+	store := tc.GetFirstStoreFromServer(t, 0)
+	repl := store.LookupReplica(roachpb.RKey(key))
+	_, pErr := kv.SendWrapped(ctx, store.TestSender(), getArgs(key))
+	require.NoError(t, pErr.GoError())
+	lease, _ := repl.GetLease()
+	require.Equal(t, roachpb.LeaseEpoch, lease.Type())
+
+	nl := store.GetStoreConfig().NodeLiveness
+	defer nl.PauseHeartbeatLoopForTest()()
+	nodeID := tc.Servers[0].NodeID()
+	pre, ok := nl.GetLiveness(nodeID)
+	require.True(t, ok)
+
+	// Pause the clock inside the stasis period of the node's liveness record,
+	// which is the epoch lease's expiration.
+	clock := tc.Servers[0].Clock()
+	manualClock.Pause()
+	stasis := pre.Expiration.WallTime - clock.MaxOffset().Nanoseconds()
+	manualClock.Increment(stasis + 10 - manualClock.UnixNano())
+
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, pErr = kv.SendWrapped(ctx, store.TestSender(), getArgs(key))
+	require.NoError(t, pErr.GoError())
+
+	post, ok := nl.GetLiveness(nodeID)
+	require.True(t, ok)
+	require.True(t, pre.Expiration.Less(post.Expiration), "expected the liveness record to be extended")
+}
+
 // TestLeaseRejectedNamingOwnLeaseDoesNotSpin tests a lease request that is
 // rejected at once with the replica's own, expired lease as the existing
 // one, as happens when the node's own liveness record is not in its cache.
