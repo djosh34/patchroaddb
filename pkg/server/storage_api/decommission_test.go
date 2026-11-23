@@ -944,6 +944,13 @@ func TestAdminDecommissionedOperations(t *testing.T) {
 				return err
 			}
 			_, err = stream.Recv()
+			// The drain cancels the node's SQL sessions before it reaches the
+			// cluster, and a session blocked on the cluster the node can no
+			// longer reach may not stop within the drain's wait. Try again: the
+			// next drain finds them cancelled and gets to the denied step.
+			if err != nil && strings.Contains(err.Error(), "did not respond to cancellation") {
+				return errors.Newf("draining SQL sessions: %s", err.Error())
+			}
 			return err
 		}},
 	}
