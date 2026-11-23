@@ -23,7 +23,10 @@
 // partitions and delay, and S3 errors and stalls. Between faults the
 // network has a base latency of 0.2 to 2 ms a pair of machines, from the
 // seed: gosim delivers at once by default, and machines that answer each
-// other at once would keep simulated time from passing.
+// other at once would keep simulated time from passing. A partition holds
+// the packets sent across it and delivers them, in order, when it ends, as
+// TCP would resend them, so a connection that does not time out meanwhile
+// goes on where it was.
 //
 // The checks:
 //   - no node stops on its own and no statement returns an internal error.
