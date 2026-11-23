@@ -2018,10 +2018,15 @@ func TestEpochLeaseInStasisIsExtended(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
+	// The test needs epoch-based leases, which test builds may turn off at
+	// random.
+	st := cluster.MakeTestingClusterSettings()
+	kvserver.ExpirationLeasesOnly.Override(ctx, &st.SV, false) // override metamorphism
 	manualClock := hlc.NewHybridManualClock()
 	tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{
 		ReplicationMode: base.ReplicationManual,
 		ServerArgs: base.TestServerArgs{
+			Settings: st,
 			Knobs: base.TestingKnobs{
 				Store:  &kvserver.StoreTestingKnobs{DisableAutomaticLeaseRenewal: true},
 				Server: &server.TestingKnobs{WallClock: manualClock},
