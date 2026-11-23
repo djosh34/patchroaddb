@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/stretchr/testify/require"
 )
 
@@ -82,4 +84,24 @@ func TestRetry(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("retry didn't stop on non-retryable error")
 	}
+}
+
+// TestRetryAfterFlowConnectionLost checks that a startup step whose DistSQL
+// flow lost its connection to another node runs again. A sim campaign found
+// nodes that failed to start because a startup read hit "inbox communication
+// error" once while a peer restarted.
+func TestRetryAfterFlowConnectionLost(t *testing.T) {
+	ctx := context.Background()
+	count := 0
+	err := RunIdempotentWithRetry(ctx, make(chan struct{}), "read over a flow",
+		func(ctx context.Context) error {
+			count++
+			if count == 1 {
+				return pgerror.Wrap(context.Canceled, pgcode.InternalConnectionFailure,
+					"inbox communication error")
+			}
+			return nil
+		})
+	require.NoError(t, err)
+	require.Equal(t, 2, count)
 }

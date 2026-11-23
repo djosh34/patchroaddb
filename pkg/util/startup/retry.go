@@ -143,7 +143,7 @@ func RunIdempotentWithRetryEx[T any](
 		if err == nil {
 			break
 		}
-		if ctx.Err() != nil || !IsRetryableReplicaError(err) {
+		if ctx.Err() != nil || !isRetryableStartupError(err) {
 			break
 		}
 		if every.ShouldLog() {
@@ -204,6 +204,18 @@ func inStartup() bool {
 	startupGoroutineIDs.RLock()
 	defer startupGoroutineIDs.RUnlock()
 	return startupGoroutineIDs.ids[currentID]
+}
+
+// isRetryableStartupError reports whether a startup step should run again
+// after err. A startup read that runs as a DistSQL flow fails with
+// InternalConnectionFailure ("inbox communication error") when the
+// connection to another node drops mid-flow, such as when that node restarts
+// or is cut off. The step is idempotent, so running it again is safe, and the
+// retry loop still stops when the startup context ends or the server
+// quiesces.
+func isRetryableStartupError(err error) bool {
+	return IsRetryableReplicaError(err) ||
+		pgerror.GetPGCode(err) == pgcode.InternalConnectionFailure
 }
 
 // IsRetryableReplicaError returns true for replica availability errors.
