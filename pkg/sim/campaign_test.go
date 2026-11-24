@@ -378,6 +378,16 @@ func TestSeedLimits(t *testing.T) {
 	// real time while it runs, longer than its limit of CPU time, which it
 	// must not pass. The run saves whether its limit of real time, 15 s,
 	// passed by the end of its spin: only a stop during the run makes it so.
+	//
+	// The test binary starts here, before the run: until the run, nothing
+	// waits for it, so its pid stays its own, even should it end, until the
+	// handle to it (a pidfd), which a recycled pid cannot redirect, is
+	// open.
+	runner := metatesting.ForTestBinary(t, bin)
+	proc, err := os.FindProcess(childOf(t, os.Getpid(), bin))
+	if err != nil {
+		t.Fatal(err)
+	}
 	var starved *metatesting.RunResult
 	var starvedErr error
 	done := make(chan struct{})
@@ -385,17 +395,10 @@ func TestSeedLimits(t *testing.T) {
 		defer close(done)
 		c := config("TestSpinFor", "SIM_SPIN=1", "SIM_SPIN_SECONDS=6")
 		c.WallLimit = 15 * time.Second
-		starved, starvedErr = metatesting.ForTestBinary(t, bin).RunQuiet(c)
+		starved, starvedErr = runner.RunQuiet(c)
 	}()
-	pid := childOf(t, os.Getpid(), bin)
-	// A handle to the process (a pidfd), which a recycled pid cannot
-	// redirect.
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		t.Fatal(err)
-	}
 	// Stop it once it spins: it has used 3 s of CPU time.
-	for deadline := timeutil.Now().Add(5 * time.Minute); cpuOf(t, pid) < 3*time.Second; time.Sleep(10 * time.Millisecond) {
+	for deadline := timeutil.Now().Add(5 * time.Minute); cpuOf(t, proc.Pid) < 3*time.Second; time.Sleep(10 * time.Millisecond) {
 		select {
 		case <-done:
 			t.Fatal("the run ended before its process was stopped")
