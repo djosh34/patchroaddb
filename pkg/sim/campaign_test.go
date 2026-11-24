@@ -64,6 +64,20 @@ func limits(t *testing.T) seedLimits {
 	}
 }
 
+// runConfig is the gosim run of test with the seed and the planted bug,
+// at the limits l. Every seed runs with it (runSeed, TestReplay), and
+// TestSeedLimits checks its limits on other tests. Every run gets the same
+// variables, even an empty one: their number changes the run.
+func (l seedLimits) runConfig(test string, seed int64, planted string) *metatesting.RunConfig {
+	return &metatesting.RunConfig{
+		Test:     test,
+		Seed:     seed,
+		ExtraEnv: []string{"PATCHROADDB_PLANTED=" + planted},
+		WallKill: l.wall,
+		CPUKill:  l.cpu,
+	}
+}
+
 // runSeed runs TestSeed with the seed in a gosim run, ended at its limits
 // (seedLimits). With out set, a failing run's log, error and artifacts go to
 // out/seed-<seed>/, with how to replay it.
@@ -71,15 +85,7 @@ func runSeed(
 	t *testing.T, bin string, seed int64, planted string, l seedLimits, out string,
 ) seedOutcome {
 	start := timeutil.Now()
-	// Every run gets the same variables, even an empty one: their number
-	// changes the run.
-	res, err := metatesting.ForTestBinary(t, bin).RunQuiet(&metatesting.RunConfig{
-		Test:     "TestSeed",
-		Seed:     seed,
-		ExtraEnv: []string{"PATCHROADDB_PLANTED=" + planted},
-		WallKill: l.wall,
-		CPUKill:  l.cpu,
-	})
+	res, err := metatesting.ForTestBinary(t, bin).RunQuiet(l.runConfig("TestSeed", seed, planted))
 	o := seedOutcome{wall: timeutil.Since(start)}
 	switch {
 	case err != nil:
@@ -275,10 +281,7 @@ func TestReplay(t *testing.T) {
 	planted := simEnv("PATCHROADDB_PLANTED")
 	out := simEnv("SIM_OUT")
 	run := func() *metatesting.RunResult {
-		res, err := metatesting.ForTestBinary(t, bin).RunQuiet(&metatesting.RunConfig{
-			Test: "TestSeed", Seed: seed, ExtraEnv: []string{"PATCHROADDB_PLANTED=" + planted},
-			WallKill: l.wall, CPUKill: l.cpu,
-		})
+		res, err := metatesting.ForTestBinary(t, bin).RunQuiet(l.runConfig("TestSeed", seed, planted))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -352,12 +355,17 @@ func TestSeedLimits(t *testing.T) {
 	if bin == "" {
 		skip.IgnoreLint(t, "SIM_BINARY is not set; sim.yml runs this test")
 	}
-	const cpu = 10 * time.Second
+	// The limits of a seed, made short: 10 s of CPU time, and 2 minutes of
+	// real time as the backstop, should the limit of CPU time not work.
+	l := seedLimits{wall: 2 * time.Minute, cpu: 10 * time.Second}
+	config := func(test string, extra ...string) *metatesting.RunConfig {
+		c := l.runConfig(test, 1, "")
+		c.ExtraEnv = append(c.ExtraEnv, extra...)
+		return c
+	}
 
 	// TestSpin never yields: only the limit of CPU time can end it here.
-	res, err := metatesting.ForTestBinary(t, bin).RunQuiet(&metatesting.RunConfig{
-		Test: "TestSpin", Seed: 1, ExtraEnv: []string{"SIM_SPIN=1"}, WallKill: time.Hour, CPUKill: cpu,
-	})
+	res, err := metatesting.ForTestBinary(t, bin).RunQuiet(config("TestSpin", "SIM_SPIN=1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -370,15 +378,22 @@ func TestSeedLimits(t *testing.T) {
 	// real time while it runs, longer than its limit of CPU time, which it
 	// must not pass. The run saves whether its limit of real time, 15 s,
 	// passed by the end of its spin: only a stop during the run makes it so.
+	var starved *metatesting.RunResult
+	var starvedErr error
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		res, err = metatesting.ForTestBinary(t, bin).RunQuiet(&metatesting.RunConfig{
-			Test: "TestSpinFor", Seed: 1, ExtraEnv: []string{"SIM_SPIN=1", "SIM_SPIN_SECONDS=6"},
-			WallLimit: 15 * time.Second, WallKill: time.Hour, CPUKill: cpu,
-		})
+		c := config("TestSpinFor", "SIM_SPIN=1", "SIM_SPIN_SECONDS=6")
+		c.WallLimit = 15 * time.Second
+		starved, starvedErr = metatesting.ForTestBinary(t, bin).RunQuiet(c)
 	}()
 	pid := childOf(t, os.Getpid(), bin)
+	// A handle to the process (a pidfd), which a recycled pid cannot
+	// redirect.
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Stop it once it spins: it has used 3 s of CPU time.
 	for deadline := timeutil.Now().Add(5 * time.Minute); cpuOf(t, pid) < 3*time.Second; time.Sleep(10 * time.Millisecond) {
 		select {
@@ -390,22 +405,22 @@ func TestSeedLimits(t *testing.T) {
 			t.Fatal("the run did not spin")
 		}
 	}
-	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
+	if err := proc.Signal(syscall.SIGSTOP); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = syscall.Kill(pid, syscall.SIGCONT) }()
+	defer func() { _ = proc.Signal(syscall.SIGCONT) }()
 	time.Sleep(20 * time.Second)
-	if err := syscall.Kill(pid, syscall.SIGCONT); err != nil {
+	if err := proc.Signal(syscall.SIGCONT); err != nil {
 		t.Fatal(err)
 	}
 	<-done
-	if err != nil {
-		t.Fatal(err)
+	if starvedErr != nil {
+		t.Fatal(starvedErr)
 	}
-	if res.Failed || res.Ended {
-		t.Errorf("a starved run failed: ended %v, err %q", res.Ended, res.Err)
+	if starved.Failed || starved.Ended {
+		t.Errorf("a starved run failed: ended %v, err %q", starved.Ended, starved.Err)
 	}
-	if got := string(res.Artifacts["wall-passed"]); got != "true" {
+	if got := string(starved.Artifacts["wall-passed"]); got != "true" {
 		t.Errorf("the run's limit of real time had not passed by the end of its spin (wall-passed %q): its process was not stopped while it ran", got)
 	}
 }

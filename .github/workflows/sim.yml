@@ -150,7 +150,7 @@ jobs:
           "$vm" report "VM at the start" || :
           "$vm" sample "$RUNNER_TEMP/out/vm.log" &
           sampler=$!
-          trap 'kill $sampler 2>/dev/null || :; "$vm" report "VM at the end" "$RUNNER_TEMP/out/vm.log" || :' EXIT
+          trap 'kill $sampler 2>/dev/null || :; wait $sampler 2>/dev/null || :; "$vm" report "VM at the end" "$RUNNER_TEMP/out/vm.log" || :' EXIT
           start=$((FIRST + SHARD * PER))
           end=$((FIRST + SEEDS))
           end=$(( start + PER < end ? start + PER : end ))
