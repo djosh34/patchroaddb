@@ -141,8 +141,9 @@ jobs:
           set -uo pipefail
           chmod +x bin/sim/*.test
           mkdir -p "$RUNNER_TEMP/out"
-          # The VM's CPUs, memory and memory pressure, at the start, every
-          # 30 seconds (out/vm.log) and at the end (#59).
+          # The VM's CPUs and memory at the start and the end, and every 30
+          # seconds in out/vm.log, with what shows a stalled VM: gaps between
+          # samples, CPU steal and major page faults (#59, build/sim-vm.sh).
           vm="$GITHUB_WORKSPACE/build/sim-vm.sh"
           "$vm" report "VM at the start"
           "$vm" sample "$RUNNER_TEMP/out/vm.log" &
