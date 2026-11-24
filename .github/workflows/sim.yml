@@ -140,11 +140,18 @@ jobs:
         run: |
           set -uo pipefail
           chmod +x bin/sim/*.test
+          mkdir -p "$RUNNER_TEMP/out"
+          # The VM's CPUs, memory and memory pressure, at the start, every
+          # 30 seconds (out/vm.log) and at the end (#59).
+          vm="$GITHUB_WORKSPACE/build/sim-vm.sh"
+          "$vm" report "VM at the start"
+          "$vm" sample "$RUNNER_TEMP/out/vm.log" &
+          sampler=$!
+          trap 'kill $sampler 2>/dev/null; "$vm" report "VM at the end" "$RUNNER_TEMP/out/vm.log"' EXIT
           start=$((FIRST + SHARD * PER))
           end=$((FIRST + SEEDS))
           end=$(( start + PER < end ? start + PER : end ))
           per=$(( (end - start + PROCS - 1) / PROCS ))
-          mkdir -p "$RUNNER_TEMP/out"
           cd pkg/sim
           pids=()
           for p in $(seq 0 $((PROCS - 1))); do
@@ -186,6 +193,9 @@ jobs:
       - name: Power loss after the first start
         run: |
           chmod +x bin/sim/*.test
+          vm="$GITHUB_WORKSPACE/build/sim-vm.sh"
+          "$vm" report "VM at the start"
+          trap '"$vm" report "VM at the end"' EXIT
           cd pkg/sim
           SIM_BINARY=$GITHUB_WORKSPACE/bin/sim/sim-gosim.test SIM_OUT=$RUNNER_TEMP/out \
             "$GITHUB_WORKSPACE/bin/sim/sim.test" -test.run '^TestFirstStart$' -test.v -test.timeout 20m
