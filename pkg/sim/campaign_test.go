@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -45,11 +46,29 @@ type seedOutcome struct {
 	artifacts  map[string][]byte
 }
 
-// runSeed runs TestSeed with the seed in a gosim run, ended after wall of
-// real time. With out set, a failing run's log, error and artifacts go to
+// seedLimits are the limits a seed's gosim run gets. cpu, the CPU time
+// the run's process uses, ends a run that spins: it burns CPU. A run whose
+// process is starved, as on a VM that stalls, uses little CPU, and only
+// wall, the real time, ends it, much later.
+type seedLimits struct {
+	wall, cpu time.Duration
+}
+
+// limits returns the limits of a seed: SIM_WALL_MINUTES of real time
+// (default 20) and SIM_CPU_SECONDS of CPU time (default 300). A healthy
+// seed uses about 10 to 25 CPU-s.
+func limits(t *testing.T) seedLimits {
+	return seedLimits{
+		wall: time.Duration(envInt(t, "SIM_WALL_MINUTES", 20)) * time.Minute,
+		cpu:  time.Duration(envInt(t, "SIM_CPU_SECONDS", 300)) * time.Second,
+	}
+}
+
+// runSeed runs TestSeed with the seed in a gosim run, ended at its limits
+// (seedLimits). With out set, a failing run's log, error and artifacts go to
 // out/seed-<seed>/, with how to replay it.
 func runSeed(
-	t *testing.T, bin string, seed int64, planted string, wall time.Duration, out string,
+	t *testing.T, bin string, seed int64, planted string, l seedLimits, out string,
 ) seedOutcome {
 	start := timeutil.Now()
 	// Every run gets the same variables, even an empty one: their number
@@ -58,14 +77,16 @@ func runSeed(
 		Test:     "TestSeed",
 		Seed:     seed,
 		ExtraEnv: []string{"PATCHROADDB_PLANTED=" + planted},
-		WallKill: wall,
+		WallKill: l.wall,
+		CPUKill:  l.cpu,
 	})
 	o := seedOutcome{wall: timeutil.Since(start)}
 	switch {
 	case err != nil:
 		o.failed, o.reason = true, fmt.Sprintf("the test binary failed: %v", err)
 	case res.Ended:
-		o.failed, o.reason = true, fmt.Sprintf("timed out after %s of real time: %s", wall, res.Err)
+		// gosim's error says which limit the run passed.
+		o.failed, o.reason = true, "timed out: "+res.Err
 	case res.Failed:
 		o.failed, o.reason = true, res.Err
 		if o.reason == "" {
@@ -176,7 +197,7 @@ type summary struct {
 }
 
 // TestCampaign runs the seeds SIM_FIRST to SIM_FIRST+SIM_COUNT-1, each a
-// gosim run of its own with SIM_WALL_MINUTES of real time (default 5).
+// gosim run of its own with the limits of a seed (seedLimits).
 // Every hundredth seed runs twice and must give the same run. Failing
 // seeds go to SIM_OUT with their logs; the test fails if any seed failed.
 func TestCampaign(t *testing.T) {
@@ -185,7 +206,7 @@ func TestCampaign(t *testing.T) {
 		skip.IgnoreLint(t, "SIM_BINARY is not set; build/sim-build.sh builds the binary, sim.yml runs campaigns")
 	}
 	first, count := envInt(t, "SIM_FIRST", 1), envInt(t, "SIM_COUNT", 1)
-	wall := time.Duration(envInt(t, "SIM_WALL_MINUTES", 5)) * time.Minute
+	l := limits(t)
 	out := simEnv("SIM_OUT")
 	planted := simEnv("PATCHROADDB_PLANTED")
 	s := summary{First: first, Count: count, Failed: make(map[int64]string)}
@@ -205,12 +226,12 @@ func TestCampaign(t *testing.T) {
 		}
 	}
 	for seed := first; seed < first+count; seed++ {
-		o := runSeed(t, bin, seed, planted, wall, out)
+		o := runSeed(t, bin, seed, planted, l, out)
 		s.Run++
 		s.CPUSeconds += o.cpuSeconds
 		s.WallSecs += o.wall.Seconds()
 		if !o.failed && seed%100 == 0 {
-			again := runSeed(t, bin, seed, planted, wall, "")
+			again := runSeed(t, bin, seed, planted, l, "")
 			s.Replayed++
 			switch {
 			case again.failed:
@@ -250,12 +271,13 @@ func TestReplay(t *testing.T) {
 		skip.IgnoreLint(t, "SIM_BINARY and SIM_SEED are not set; build/sim-replay.sh replays a seed")
 	}
 	seed := envInt(t, "SIM_SEED", 0)
-	wall := time.Duration(envInt(t, "SIM_WALL_MINUTES", 5)) * time.Minute
+	l := limits(t)
 	planted := simEnv("PATCHROADDB_PLANTED")
 	out := simEnv("SIM_OUT")
 	run := func() *metatesting.RunResult {
 		res, err := metatesting.ForTestBinary(t, bin).RunQuiet(&metatesting.RunConfig{
-			Test: "TestSeed", Seed: seed, ExtraEnv: []string{"PATCHROADDB_PLANTED=" + planted}, WallKill: wall,
+			Test: "TestSeed", Seed: seed, ExtraEnv: []string{"PATCHROADDB_PLANTED=" + planted},
+			WallKill: l.wall, CPUKill: l.cpu,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -318,6 +340,119 @@ func TestFirstStart(t *testing.T) {
 	if res.Failed || res.Ended {
 		t.Errorf("TestFirstStartPowerLoss failed: %s", res.Err)
 	}
+}
+
+// TestSeedLimits checks the limits a seed runs with (seedLimits), on the
+// translated test binary. A run that spins passes its limit of CPU time
+// and fails as a timeout, with every goroutine's stack. A run whose
+// process is starved of CPU, as on a VM that stalls, outlives its limit of
+// CPU time in real time and still passes.
+func TestSeedLimits(t *testing.T) {
+	bin := simEnv("SIM_BINARY")
+	if bin == "" {
+		skip.IgnoreLint(t, "SIM_BINARY is not set; sim.yml runs this test")
+	}
+	const cpu = 10 * time.Second
+
+	// TestSpin never yields: only the limit of CPU time can end it here.
+	res, err := metatesting.ForTestBinary(t, bin).RunQuiet(&metatesting.RunConfig{
+		Test: "TestSpin", Seed: 1, ExtraEnv: []string{"SIM_SPIN=1"}, WallKill: time.Hour, CPUKill: cpu,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Failed || !res.Ended || !strings.Contains(res.Err, "passed its limit of 10s of CPU time") ||
+		!strings.Contains(string(res.Artifacts["gosim-stacks.txt"]), "TestSpin") {
+		t.Errorf("a spinning run: failed %v, ended %v, err %q", res.Failed, res.Ended, res.Err)
+	}
+
+	// TestSpinFor uses 4 s of CPU time. Its process is stopped for 15 s of
+	// real time while it runs, longer than the limit of CPU time, which it
+	// must not pass.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		res, err = metatesting.ForTestBinary(t, bin).RunQuiet(&metatesting.RunConfig{
+			Test: "TestSpinFor", Seed: 1, ExtraEnv: []string{"SIM_SPIN=1", "SIM_SPIN_SECONDS=4"},
+			WallKill: time.Hour, CPUKill: cpu,
+		})
+	}()
+	pid := childOf(t, os.Getpid(), bin)
+	// Stop it once it spins: it has used 2 s of CPU time.
+	for cpuOf(t, pid) < 2*time.Second {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(15 * time.Second)
+	select {
+	case <-done:
+		t.Fatal("the run ended before its process was stopped")
+	default:
+	}
+	if err := syscall.Kill(pid, syscall.SIGCONT); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Failed || res.Ended {
+		t.Errorf("a starved run failed: ended %v, err %q", res.Ended, res.Err)
+	}
+}
+
+// procStat returns the fields of /proc/<pid>/stat after the command, which
+// is in parentheses: the state, the parent's pid, and so on.
+func procStat(pid int) []string {
+	stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return nil
+	}
+	return strings.Fields(string(stat[bytes.LastIndexByte(stat, ')')+1:]))
+}
+
+// cpuOf returns the CPU time the process pid used so far.
+func cpuOf(t *testing.T, pid int) time.Duration {
+	f := procStat(pid)
+	if len(f) < 13 {
+		t.Fatalf("no process %d", pid)
+	}
+	// utime and stime, in clock ticks of 1/100 s.
+	utime, _ := strconv.ParseInt(f[11], 10, 64)
+	stime, _ := strconv.ParseInt(f[12], 10, 64)
+	return time.Duration(utime+stime) * 10 * time.Millisecond
+}
+
+// childOf waits for a running child process of parent whose executable is
+// bin, and returns its pid.
+func childOf(t *testing.T, parent int, bin string) int {
+	want, err := filepath.EvalSymlinks(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for deadline := timeutil.Now().Add(time.Minute); timeutil.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		procs, err := os.ReadDir("/proc")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range procs {
+			pid, err := strconv.Atoi(p.Name())
+			if err != nil {
+				continue
+			}
+			fields := procStat(pid)
+			if len(fields) < 2 || fields[0] == "Z" || fields[1] != strconv.Itoa(parent) {
+				continue
+			}
+			if exe, err := os.Readlink(filepath.Join("/proc", p.Name(), "exe")); err == nil && exe == want {
+				return pid
+			}
+		}
+	}
+	t.Fatalf("no running child of %d runs %s", parent, bin)
+	return 0
 }
 
 // plantedChecks is, for each planted bug, whether a failing run's log
@@ -389,10 +524,10 @@ func TestPlanted(t *testing.T) {
 		t.Fatalf("no check is known for the planted bug %q", bug)
 	}
 	first, count := envInt(t, "SIM_FIRST", 1), envInt(t, "SIM_COUNT", 20)
-	wall := time.Duration(envInt(t, "SIM_WALL_MINUTES", 5)) * time.Minute
+	l := limits(t)
 	out := simEnv("SIM_OUT")
 	for seed := first; seed < first+count; seed++ {
-		o := runSeed(t, bin, seed, bug, wall, out)
+		o := runSeed(t, bin, seed, bug, l, out)
 		if !o.failed {
 			t.Logf("%s: seed %d passed", bug, seed)
 			continue
@@ -409,7 +544,7 @@ func TestPlanted(t *testing.T) {
 		if out != "" {
 			withoutOut = filepath.Join(out, "without-bug")
 		}
-		without := runSeed(t, bin, seed, "", wall, withoutOut)
+		without := runSeed(t, bin, seed, "", l, withoutOut)
 		if without.failed {
 			t.Logf("%s: seed %d fails without the bug too: %s", bug, seed, without.reason)
 			continue

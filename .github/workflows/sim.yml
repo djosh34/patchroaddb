@@ -5,9 +5,10 @@
 #
 # One job builds the binaries once. Then a matrix of jobs, all submitted at
 # once, each runs a fixed range of seeds in PROCS processes; GitHub queues
-# them and runs as many as the account allows. A seed that fails or runs
-# out of real time is a failure, and its full logs and replay command are
-# uploaded, also when its job fails. The last job counts every assigned
+# them and runs as many as the account allows. A seed that fails, or
+# passes its limit of CPU time (it spins) or of real time, is a failure,
+# and its full logs and replay command are uploaded, also when its job
+# fails. The last job counts every assigned
 # seed: a campaign counts only when all of them ran and passed.
 #
 # With planted=all, the run instead checks that every planted bug
@@ -180,7 +181,7 @@ jobs:
 
   # The regression test of a store lost in a power loss right after a
   # node's first start (pkg/sim TestFirstStart): a fixed scenario, not a
-  # seed.
+  # seed. Then the test of the limits a seed runs with (TestSeedLimits).
   first-start:
     if: inputs.planted != 'all' && inputs.replay == ''
     needs: [build]
@@ -201,6 +202,13 @@ jobs:
           cd pkg/sim
           SIM_BINARY=$GITHUB_WORKSPACE/bin/sim/sim-gosim.test SIM_OUT=$RUNNER_TEMP/out \
             "$GITHUB_WORKSPACE/bin/sim/sim.test" -test.run '^TestFirstStart$' -test.v -test.timeout 20m
+      - name: The limits of a seed
+        if: always()
+        run: |
+          chmod +x bin/sim/*.test
+          cd pkg/sim
+          SIM_BINARY=$GITHUB_WORKSPACE/bin/sim/sim-gosim.test \
+            "$GITHUB_WORKSPACE/bin/sim/sim.test" -test.run '^TestSeedLimits$' -test.v -test.timeout 10m
       - if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -230,7 +238,7 @@ jobs:
         env:
           RESULT: ${{ needs.first-start.result }}
         run: |
-          echo "TestFirstStart: $RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "TestFirstStart and TestSeedLimits: $RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
           [[ $RESULT == success ]]
 
   planted:

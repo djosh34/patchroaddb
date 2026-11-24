@@ -16,6 +16,8 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -111,5 +113,41 @@ func TestFirstStartPowerLoss(t *testing.T) {
 	}
 	for _, f := range c.failed() {
 		t.Error(f)
+	}
+}
+
+// TestSpin and TestSpinFor are not seeds: TestSeedLimits runs them to
+// check the limits a seed runs with. TestSpin never yields, as a
+// simulation that hangs in a busy loop. TestSpinFor uses SIM_SPIN_SECONDS
+// of CPU time, without yielding, and then passes.
+func TestSpin(t *testing.T) {
+	if os.Getenv("SIM_SPIN") != "1" {
+		t.Skip("TestSeedLimits runs this")
+	}
+	for n := 0; ; n++ {
+		_ = n
+	}
+}
+
+func TestSpinFor(t *testing.T) {
+	if os.Getenv("SIM_SPIN") != "1" {
+		t.Skip("TestSeedLimits runs this")
+	}
+	secs, err := strconv.Atoi(os.Getenv("SIM_SPIN_SECONDS"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, err := gosim.CPUTime()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		now, err := gosim.CPUTime()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if now-start >= time.Duration(secs)*time.Second {
+			return
+		}
 	}
 }
