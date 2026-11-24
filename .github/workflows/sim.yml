@@ -7,9 +7,10 @@
 # once, each runs a fixed range of seeds in PROCS processes; GitHub queues
 # them and runs as many as the account allows. A seed that fails is a
 # failure, and its full logs and replay command are uploaded, also when its
-# job fails. A seed whose run passes its limit of CPU time (it spins) or of
-# real time runs once more, at once, and fails if that run does too; the
-# first run's logs are uploaded under first-run/, and the summary lists it.
+# job fails. In a campaign or the planted check, a seed whose run its limit
+# of CPU time (it spins) or of real time ends runs once more, at once, and
+# fails if that run fails too; the first run's logs are uploaded under
+# first-run/, and the summary lists it.
 # The last job counts every assigned seed: a campaign counts only when all
 # of them ran and passed.
 #

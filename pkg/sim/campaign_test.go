@@ -99,9 +99,13 @@ func outcome(res *metatesting.RunResult, err error, wall time.Duration, steal fl
 	switch {
 	case err != nil:
 		o.failed, o.reason = true, fmt.Sprintf("the test binary failed: %v", err)
-	case res.Ended:
+	case res.Ended && strings.Contains(res.Err, " passed its limit of "):
 		// gosim's error says which limit the run passed.
 		o.failed, o.timedOut, o.reason = true, true, "timed out: "+res.Err
+	case res.Ended:
+		// gosim also ends the test binary when it cannot read the run's
+		// CPU time: no limit ended the run.
+		o.failed, o.reason = true, "the test binary ended: "+res.Err
 	case res.Failed:
 		o.failed, o.reason = true, res.Err
 		if o.reason == "" {
@@ -127,16 +131,19 @@ func outcome(res *metatesting.RunResult, err error, wall time.Duration, steal fl
 // ended, so the second run is in a fresh process of the same binary. The
 // seed fails if the second run also passes a limit, or fails in any other
 // way. Any other failure counts at once: a failed check, a panic, an
-// internal error, a test binary that failed. So does a run that passed
-// its limit of CPU time only between gosim's last two checks: no limit
-// ended it, and it failed as it ended. first is the run that a limit
-// ended, when the seed ran again.
-func countedRun(run func() seedOutcome) (o seedOutcome, first *seedOutcome) {
+// internal error, a test binary that failed or whose CPU time gosim
+// could not read. So does a run that passed its limit of CPU time only
+// between gosim's last two checks: no limit ended it, and it failed as it
+// ended. keep gets the run that a limit ended before the second run
+// starts, so that it is kept even should the second never run; first is
+// that run, when the seed ran again.
+func countedRun(run func() seedOutcome, keep func(first seedOutcome)) (o seedOutcome, first *seedOutcome) {
 	o = run()
 	if !o.timedOut {
 		return o, nil
 	}
 	f := o
+	keep(f)
 	o = run()
 	switch {
 	case o.timedOut:
@@ -155,13 +162,15 @@ func runCounted(
 ) (o seedOutcome, first *seedOutcome) {
 	o, first = countedRun(func() seedOutcome {
 		return runSeed(t, bin, l.runConfig("TestSeed", seed, planted))
-	})
-	if first != nil {
-		t.Logf("seed %d: a time limit ended its run, with %s steal, so it ran again: failed %v; the first run %s",
-			seed, fmtSteal(first.steal), o.failed, first.reason)
+	}, func(first seedOutcome) {
+		t.Logf("seed %d: a time limit ended its run, with %s steal, so it runs again; the first run %s",
+			seed, fmtSteal(first.steal), first.reason)
 		if out != "" {
 			first.save(t, filepath.Join(out, firstDir), seed, planted)
 		}
+	})
+	if first != nil {
+		t.Logf("seed %d ran again: failed %v", seed, o.failed)
 	}
 	return o, first
 }
@@ -507,18 +516,22 @@ func TestSeedLimits(t *testing.T) {
 
 	// TestSpin never yields: only the limit of CPU time can end it here. It
 	// does so in both runs that a seed gets (countedRun), so it fails.
-	runs := 0
+	// runs are the seed's runs, as they came, before countedRun counts them.
+	var runs []seedOutcome
+	kept := 0
+	keep := func(seedOutcome) { kept++ }
 	o, first := countedRun(func() seedOutcome {
-		runs++
-		return runSeed(t, bin, config("TestSpin", "SIM_SPIN=1"))
-	})
+		runs = append(runs, runSeed(t, bin, config("TestSpin", "SIM_SPIN=1")))
+		return runs[len(runs)-1]
+	}, keep)
 	spun := func(o seedOutcome) bool {
-		return o.timedOut && strings.Contains(o.reason, "passed its limit of 10s of CPU time") &&
+		return o.timedOut && strings.HasPrefix(o.reason, "timed out: ") &&
+			strings.Contains(o.reason, "passed its limit of 10s of CPU time") &&
 			strings.Contains(string(o.artifacts["gosim-stacks.txt"]), "TestSpin")
 	}
-	if runs != 2 || first == nil || !spun(*first) || !spun(o) || !o.failed ||
-		!strings.HasPrefix(o.reason, "timed out twice; ") {
-		t.Errorf("a spinning seed: %d runs, failed %v, reason %q", runs, o.failed, o.reason)
+	if len(runs) != 2 || !spun(runs[0]) || !spun(runs[1]) || first == nil || kept != 1 ||
+		!o.failed || !strings.HasPrefix(o.reason, "timed out twice; ") {
+		t.Errorf("a spinning seed: %d runs (%+v), failed %v, reason %q", len(runs), runs, o.failed, o.reason)
 	}
 
 	// TestSpinFor uses 6 s of CPU time. Its process is stopped for 20 s of
@@ -545,18 +558,22 @@ func TestSeedLimits(t *testing.T) {
 	// not stopped and passes, so the seed does not fail.
 	stalled := config("TestSpinFor", "SIM_SPIN=1", "SIM_SPIN_SECONDS=6")
 	stalled.WallKill = 30 * time.Second
-	runs = 0
+	runs, kept = nil, 0
 	o, first = countedRun(func() seedOutcome {
-		runs++
-		if runs == 1 {
+		if len(runs) == 0 {
 			res, err := runStopped(t, bin, stalled, 40*time.Second)
-			return outcome(res, err, 0, -1)
+			runs = append(runs, outcome(res, err, 0, -1))
+		} else {
+			runs = append(runs, runSeed(t, bin, stalled))
 		}
-		return runSeed(t, bin, stalled)
-	})
-	if runs != 2 || first == nil || !first.timedOut ||
-		!strings.Contains(first.reason, "passed its limit of 30s of real time") || o.failed {
-		t.Errorf("a seed whose first run a stall ended: %d runs, first %+v, failed %v, reason %q", runs, first, o.failed, o.reason)
+		return runs[len(runs)-1]
+	}, keep)
+	// TestSpinFor saves wall-passed once its spin ends: a second run that
+	// skipped it would pass without it.
+	_, spunAgain := o.artifacts["wall-passed"]
+	if len(runs) != 2 || !runs[0].timedOut || !strings.Contains(runs[0].reason, "passed its limit of 30s of real time") ||
+		first == nil || kept != 1 || o.failed || !spunAgain {
+		t.Errorf("a seed whose first run a stall ended: %d runs (%+v), failed %v, reason %q", len(runs), runs, o.failed, o.reason)
 	}
 }
 
@@ -834,14 +851,25 @@ func TestCountedRun(t *testing.T) {
 			wantReason: "timed out, then failed when run again: results differ; the first run " + timedOut.reason},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			runs := 0
+			runs, kept := 0, 0
 			o, first := countedRun(func() seedOutcome {
 				runs++
 				if runs > len(tc.runs) {
 					t.Fatalf("run %d: the seed ran again", runs)
 				}
+				if runs == 2 && kept != 1 {
+					t.Fatal("the seed ran again before its first run was kept")
+				}
 				return tc.runs[runs-1]
+			}, func(f seedOutcome) {
+				kept++
+				if f.reason != timedOut.reason {
+					t.Errorf("kept %+v", f)
+				}
 			})
+			if kept != tc.wantRuns-1 {
+				t.Errorf("kept %d runs, want %d", kept, tc.wantRuns-1)
+			}
 			if runs != tc.wantRuns || o.failed != tc.wantFailed || (tc.wantFailed && o.reason != tc.wantReason) {
 				t.Errorf("%d runs, failed %v, reason %q; want %d runs, failed %v, reason %q",
 					runs, o.failed, o.reason, tc.wantRuns, tc.wantFailed, tc.wantReason)
@@ -850,6 +878,33 @@ func TestCountedRun(t *testing.T) {
 				t.Errorf("first run %+v", first)
 			}
 		})
+	}
+}
+
+// TestOutcome checks which ended runs count as timed out: only those that
+// passed a limit, not one whose CPU time gosim could not read, which
+// counts at once.
+func TestOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		err          string
+		wantTimedOut bool
+	}{
+		{"the run of TestSeed with seed 7 passed its limit of 5m0s of CPU time; the stack of every goroutine is in the artifact gosim-stacks.txt", true},
+		{"the run of TestSeed with seed 7 passed its limit of 20m0s of real time without yielding; the stack of every goroutine is in the artifact gosim-stacks.txt", true},
+		{"the run of TestSeed with seed 7 its CPU time could not be read: no rusage; the stack of every goroutine is in the artifact gosim-stacks.txt", false},
+	} {
+		o := outcome(&metatesting.RunResult{Failed: true, Ended: true, Err: tc.err}, nil, 0, -1)
+		if !o.failed || o.timedOut != tc.wantTimedOut {
+			t.Errorf("%q: failed %v, timed out %v; want timed out %v", tc.err, o.failed, o.timedOut, tc.wantTimedOut)
+		}
+		runs, wantRuns := 0, 1
+		if tc.wantTimedOut {
+			wantRuns = 2
+		}
+		countedRun(func() seedOutcome { runs++; return o }, func(seedOutcome) {})
+		if runs != wantRuns {
+			t.Errorf("%q: %d runs, want %d", tc.err, runs, wantRuns)
+		}
 	}
 }
 
