@@ -137,7 +137,9 @@ func outcome(res *metatesting.RunResult, err error, wall time.Duration, steal fl
 // ended. keep gets the run that a limit ended before the second run
 // starts, so that it is kept even should the second never run; first is
 // that run, when the seed ran again.
-func countedRun(run func() seedOutcome, keep func(first seedOutcome)) (o seedOutcome, first *seedOutcome) {
+func countedRun(
+	run func() seedOutcome, keep func(first seedOutcome),
+) (o seedOutcome, first *seedOutcome) {
 	o = run()
 	if !o.timedOut {
 		return o, nil
