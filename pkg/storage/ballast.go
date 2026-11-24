@@ -12,6 +12,7 @@ package storage
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/base"
+	storagefs "github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/sysutil"
 	"github.com/cockroachdb/errors"
@@ -134,7 +135,14 @@ func maybeEstablishBallast(
 		// TODO(jackson): Expose Truncate on vfs.FS.
 		return true, sysutil.ResizeLargeFile(ballastPath, ballastSizeBytes)
 	case currentSizeBytes < ballastSizeBytes && ballastsEnabled:
-		if err := fs.MkdirAll(fs.PathDir(ballastPath), 0755); err != nil {
+		// This can create the store directory and its parents, on a node's
+		// first start: sync what it creates, or a crash can lose the store.
+		// That happens in the CLI's disk-full check, which passes the
+		// system's filesystem, so OnDisk holds there. Called by the engine,
+		// in NewPebble or its periodic capacity check, fs is wrapped and
+		// OnDisk does not hold, but NewPebble has already created and synced
+		// the directory on disk.
+		if err := storagefs.MkdirAllStoreDir(fs, fs.PathDir(ballastPath), 0755, storagefs.OnDisk(fs)); err != nil {
 			return false, errors.Wrap(err, "creating data directory")
 		}
 		// We need to either create the ballast or extend the current ballast

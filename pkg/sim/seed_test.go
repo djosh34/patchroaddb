@@ -16,10 +16,13 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/sim/fakes3"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
+	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/jellevandenhooff/gosim"
 )
 
@@ -66,4 +69,90 @@ func TestSeed(t *testing.T) {
 	for _, f := range s.failures {
 		t.Error(f)
 	}
+}
+
+// TestFirstStartPowerLoss is the regression test of a node that lost its
+// whole store in a power loss soon after its first start (#59): the store
+// directory and its parent were created without syncing their parents. It
+// starts the cluster, cuts the power of every machine as soon as SQL works,
+// with none of the writes they had not synced, and checks that each machine
+// comes back as the node it was.
+func TestFirstStartPowerLoss(t *testing.T) {
+	gosim.SetSimulationTimeout(10 * time.Minute)
+	rng := seedRand(rand.Uint64(), rand.Uint64())
+	s3Env()
+	ctx := context.Background()
+	c, err := startCluster(ctx, 3, fakes3.New(rng), rng)
+	if err != nil {
+		t.Fatalf("starting the cluster: %v", err)
+	}
+	var ids []int64
+	for _, addr := range c.addrs() {
+		id, err := nodeID(ctx, addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	for i := range c.nodes {
+		c.crash(i)
+	}
+	for i := range c.nodes {
+		c.restart(i, false /* partial */)
+	}
+	for i, addr := range c.addrs() {
+		if err := waitSQL(ctx, addr, 3*time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		id, err := nodeID(ctx, addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id != ids[i] {
+			t.Errorf("%s came back as node %d, not node %d: it lost its store", addr, id, ids[i])
+		}
+	}
+	for _, f := range c.failed() {
+		t.Error(f)
+	}
+}
+
+// TestSpin and TestSpinFor are not seeds: TestSeedLimits runs them to
+// check the limits a seed runs with. TestSpin never yields, as a
+// simulation that hangs in a busy loop. TestSpinFor uses SIM_SPIN_SECONDS
+// of CPU time without yielding, then saves the artifact wall-passed: true
+// if the run's limit of real time (RunConfig.WallLimit) has passed by
+// then, which shows that its process was stopped while it ran.
+func TestSpin(t *testing.T) {
+	if v, _ := envutil.ExternalEnvString("SIM_SPIN", 0); v != "1" {
+		skip.IgnoreLint(t, "TestSeedLimits runs this")
+	}
+	for n := 0; ; n++ {
+		_ = n
+	}
+}
+
+func TestSpinFor(t *testing.T) {
+	if v, _ := envutil.ExternalEnvString("SIM_SPIN", 0); v != "1" {
+		skip.IgnoreLint(t, "TestSeedLimits runs this")
+	}
+	v, _ := envutil.ExternalEnvString("SIM_SPIN_SECONDS", 0)
+	secs, err := strconv.Atoi(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, err := gosim.CPUTime()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		now, err := gosim.CPUTime()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if now-start >= time.Duration(secs)*time.Second {
+			break
+		}
+	}
+	gosim.WriteArtifact("wall-passed", []byte(strconv.FormatBool(gosim.WallLimitPassed())))
 }

@@ -537,7 +537,16 @@ func (p *pendingLeaseRequest) requestLease(
 	// If we're replacing an expired epoch-based lease, we must increment the
 	// epoch of the prior owner to invalidate its leases. If we were the owner,
 	// then we instead heartbeat to become live.
-	if status.Lease.Type() == roachpb.LeaseEpoch && status.State == kvserverpb.LeaseState_EXPIRED {
+	//
+	// We also heartbeat when we extend our own epoch-based lease in its stasis
+	// period. Such a lease ends when its liveness record expires, so a lease
+	// request alone would apply the same lease, which stays unusable, and the
+	// caller would ask again at once, without waiting, until the liveness
+	// heartbeat loop caught up.
+	stasisExtension := extension && status.State == kvserverpb.LeaseState_UNUSABLE &&
+		reqLease.Type() == roachpb.LeaseEpoch
+	if status.Lease.Type() == roachpb.LeaseEpoch &&
+		(status.State == kvserverpb.LeaseState_EXPIRED || stasisExtension) {
 		var err error
 		// If this replica is previous & next lease holder, manually heartbeat to become live.
 		if extension {
@@ -1466,9 +1475,20 @@ func (r *Replica) redirectOnOrAcquireLeaseForRequest(
 							if tErr.Existing.OwnedBy(r.store.StoreID()) {
 								// The RequestLease command we sent was rejected because another
 								// lease was applied in the meantime, but we own that other
-								// lease. So, loop until the current node becomes aware that
-								// it's the leaseholder.
-								return nil
+								// lease. So, loop if that lease serves the request.
+								//
+								// The lease a rejection names is one this replica has already
+								// applied. If it still cannot serve the request, as when the
+								// node's own liveness record is not in its cache yet, another
+								// attempt would be rejected the same way at once, and the
+								// request would spin without ever waiting. Fall through to a
+								// NotLeaseHolderError instead, so the client backs off.
+								r.mu.RLock()
+								st := r.leaseStatusForRequestRLocked(ctx, r.store.Clock().NowAsClockTimestamp(), reqTS)
+								r.mu.RUnlock()
+								if st.IsValid() && st.OwnedBy(r.store.StoreID()) {
+									return nil
+								}
 							}
 
 							// Getting a LeaseRejectedError back means someone else got there

@@ -23,7 +23,10 @@
 // partitions and delay, and S3 errors and stalls. Between faults the
 // network has a base latency of 0.2 to 2 ms a pair of machines, from the
 // seed: gosim delivers at once by default, and machines that answer each
-// other at once would keep simulated time from passing.
+// other at once would keep simulated time from passing. A partition holds
+// the packets sent across it and delivers them, in order, when it ends, as
+// TCP would resend them, so a connection that does not time out meanwhile
+// goes on where it was.
 //
 // The checks:
 //   - no node stops on its own and no statement returns an internal error.
@@ -32,6 +35,8 @@
 //     is left: gosim does not tell why a machine stopped, so a node that
 //     ends its process itself in another way while crashes in fsync are on
 //     looks like one of those crashes, and is restarted;
+//   - every machine keeps its store through the crashes and power losses:
+//     after the faults it is the node it was before them;
 //   - every acknowledged write to the ledger table survives the crashes;
 //   - transfers between accounts keep the total, which holds only if the
 //     transactions are serializable;
@@ -50,10 +55,18 @@
 //
 // The binaries: TestSeed (seed_test.go) is the seed, which runs only in
 // the translated test binary. The native test binary drives it:
-// TestCampaign runs a range of seeds, TestReplay one seed twice and
-// TestPlanted the planted bugs. build/sim-build.sh builds both, and
-// .github/workflows/sim.yml runs campaigns. TestChaos runs the same
-// scenario on real processes, every night (build/ci/chaos.sh).
+// TestCampaign runs a range of seeds, TestReplay one seed twice,
+// TestPlanted the planted bugs and TestFirstStart a power loss right
+// after the first start (TestFirstStartPowerLoss). A seed's run ends if it
+// uses 300 s of CPU time, as one that spins in a busy loop does, or 20
+// minutes of real time; a seed on a VM that stalls uses little CPU and gets
+// the time it needs (seedLimits). In a campaign and the planted check, a
+// run that a limit ended runs once more, at once, as a VM whose hypervisor
+// takes its CPU can make any seed pass a limit, and the seed fails only if
+// that run fails too (countedRun, TestSeedLimits). build/sim-build.sh
+// builds both, and .github/workflows/sim.yml runs campaigns. TestChaos
+// runs the same scenario on real processes, every night
+// (build/ci/chaos.sh).
 //
 // Bugs that a campaign finds are fixed in the bug-finding outcome, each
 // with a regression test.

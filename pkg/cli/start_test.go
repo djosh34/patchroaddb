@@ -240,3 +240,25 @@ func (fs mockDiskSpaceFS) GetDiskUsage(path string) (vfs.DiskUsage, error) {
 		UsedBytes:  100<<30 - 10<<20,
 	}, nil
 }
+
+// TestCreateStoreDirsSurvivesCrash checks that createStoreDirs makes a new
+// store directory and its new parents durable, so that a crash after
+// logging created its directory inside the store does not lose the store.
+func TestCreateStoreDirsSurvivesCrash(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	mem := vfs.NewStrictMem()
+	require.NoError(t, mem.MkdirAll("/mnt", 0755))
+	dir, err := mem.OpenDir("/")
+	require.NoError(t, err)
+	require.NoError(t, dir.Sync())
+	require.NoError(t, dir.Close())
+
+	specs := []base.StoreSpec{{Path: "/mnt/new/data"}, {InMemory: true}}
+	require.NoError(t, createStoreDirs(mem, specs))
+	require.NoError(t, mem.MkdirAll("/mnt/new/data/logs", 0755))
+
+	mem.ResetToSyncedState()
+	_, err = mem.Stat("/mnt/new/data")
+	require.NoError(t, err)
+}

@@ -1957,6 +1957,170 @@ func TestLeaseExpirationBelowFutureTimeRequest(t *testing.T) {
 	})
 }
 
+// TestTxnWriteTimestampInLeaseStasis tests a transactional request whose
+// read timestamp the lease covers but whose write timestamp falls in the
+// lease's stasis period. The lease must be extended for it. Before, the
+// replica checked the lease at the read timestamp, found it valid, and
+// retried the request at once, without end and without waiting.
+func TestTxnWriteTimestampInLeaseStasis(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	ctx := context.Background()
+	manualClock := hlc.NewHybridManualClock()
+	tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{
+		ReplicationMode: base.ReplicationManual,
+		ServerArgs: base.TestServerArgs{
+			Knobs: base.TestingKnobs{
+				// Only the request may extend the lease.
+				Store:  &kvserver.StoreTestingKnobs{DisableAutomaticLeaseRenewal: true},
+				Server: &server.TestingKnobs{WallClock: manualClock},
+			},
+		},
+	})
+	defer tc.Stopper().Stop(ctx)
+	key := tc.ScratchRangeWithExpirationLease(t)
+	store := tc.GetFirstStoreFromServer(t, 0)
+	repl := store.LookupReplica(roachpb.RKey(key))
+	_, pErr := kv.SendWrapped(ctx, store.TestSender(), getArgs(key))
+	require.NoError(t, pErr.GoError())
+	preLease, _ := repl.GetLease()
+
+	// Pause the clock just before the lease's stasis period.
+	clock := tc.Servers[0].Clock()
+	manualClock.Pause()
+	stasis := preLease.Expiration.WallTime - clock.MaxOffset().Nanoseconds()
+	manualClock.Increment(stasis - 10 - manualClock.UnixNano())
+	now := clock.Now()
+
+	// The read timestamp is now, the write timestamp in the stasis period.
+	// It is synthetic so that it does not move the clock.
+	txn := roachpb.MakeTransaction("test", key, isolation.Serializable, 1, now,
+		clock.MaxOffset().Nanoseconds(), int32(tc.Servers[0].SQLInstanceID()), 0, false /* omitInRangefeeds */)
+	txn.WriteTimestamp = now.Add(20, 0).WithSynthetic(true)
+
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, pErr = kv.SendWrappedWith(ctx, store.TestSender(), kvpb.Header{Txn: &txn}, getArgs(key))
+	require.NoError(t, pErr.GoError())
+
+	postLease, _ := repl.GetLease()
+	require.True(t, preLease.Expiration.Less(*postLease.Expiration), "expected extension")
+}
+
+// TestEpochLeaseInStasisIsExtended sends a request while the store's own
+// epoch lease is in its stasis period, with the clock paused and the
+// liveness heartbeat loop off. An epoch lease is extended by its liveness
+// record, so a lease request alone applies the same lease again and leaves
+// it unusable. Before, the request asked for the lease again and again
+// without waiting, until its lease acquisition timed out. A campaign seed
+// that spun this way stopped the simulated clock.
+func TestEpochLeaseInStasisIsExtended(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	ctx := context.Background()
+	// The test needs epoch-based leases, which test builds may turn off at
+	// random.
+	st := cluster.MakeTestingClusterSettings()
+	kvserver.ExpirationLeasesOnly.Override(ctx, &st.SV, false) // override metamorphism
+	manualClock := hlc.NewHybridManualClock()
+	tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{
+		ReplicationMode: base.ReplicationManual,
+		ServerArgs: base.TestServerArgs{
+			Settings: st,
+			Knobs: base.TestingKnobs{
+				Store:  &kvserver.StoreTestingKnobs{DisableAutomaticLeaseRenewal: true},
+				Server: &server.TestingKnobs{WallClock: manualClock},
+			},
+		},
+	})
+	defer tc.Stopper().Stop(ctx)
+	key := tc.ScratchRange(t)
+	store := tc.GetFirstStoreFromServer(t, 0)
+	repl := store.LookupReplica(roachpb.RKey(key))
+	_, pErr := kv.SendWrapped(ctx, store.TestSender(), getArgs(key))
+	require.NoError(t, pErr.GoError())
+	lease, _ := repl.GetLease()
+	require.Equal(t, roachpb.LeaseEpoch, lease.Type())
+
+	nl := store.GetStoreConfig().NodeLiveness
+	defer nl.PauseHeartbeatLoopForTest()()
+	nodeID := tc.Servers[0].NodeID()
+	pre, ok := nl.GetLiveness(nodeID)
+	require.True(t, ok)
+
+	// Pause the clock inside the stasis period of the node's liveness record,
+	// which is the epoch lease's expiration.
+	clock := tc.Servers[0].Clock()
+	manualClock.Pause()
+	stasis := pre.Expiration.WallTime - clock.MaxOffset().Nanoseconds()
+	manualClock.Increment(stasis + 10 - manualClock.UnixNano())
+	// The clock cannot go back, so check that the lease is in stasis, not
+	// already expired: an expired lease took another path, which heartbeat
+	// before the fix too.
+	require.Equal(t, kvserverpb.LeaseState_UNUSABLE, repl.CurrentLeaseStatus(ctx).State)
+
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, pErr = kv.SendWrapped(ctx, store.TestSender(), getArgs(key))
+	require.NoError(t, pErr.GoError())
+
+	post, ok := nl.GetLiveness(nodeID)
+	require.True(t, ok)
+	require.True(t, pre.Expiration.Less(post.Expiration), "expected the liveness record to be extended")
+}
+
+// TestLeaseRejectedNamingOwnLeaseDoesNotSpin tests a lease request that is
+// rejected at once with the replica's own, expired lease as the existing
+// one, as happens when the node's own liveness record is not in its cache.
+// Before, the request retried the lease request without waiting, again and
+// again, until its lease acquisition timed out.
+func TestLeaseRejectedNamingOwnLeaseDoesNotSpin(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	ctx := context.Background()
+	manualClock := hlc.NewHybridManualClock()
+	var rangeID atomic.Int64
+	var rejections atomic.Int64
+	tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{
+		ReplicationMode: base.ReplicationManual,
+		ServerArgs: base.TestServerArgs{
+			Knobs: base.TestingKnobs{
+				Store: &kvserver.StoreTestingKnobs{
+					DisableAutomaticLeaseRenewal: true,
+					TestingRequestFilter: func(ctx context.Context, ba *kvpb.BatchRequest) *kvpb.Error {
+						req, ok := ba.GetArg(kvpb.RequestLease)
+						if !ok || int64(ba.RangeID) != rangeID.Load() {
+							return nil
+						}
+						rejections.Add(1)
+						lease := req.(*kvpb.RequestLeaseRequest)
+						return kvpb.NewError(&kvpb.LeaseRejectedError{
+							Existing:  lease.PrevLease,
+							Requested: lease.Lease,
+							Message:   "rejected by the test",
+						})
+					},
+				},
+				Server: &server.TestingKnobs{WallClock: manualClock},
+			},
+		},
+	})
+	defer tc.Stopper().Stop(ctx)
+	key := tc.ScratchRangeWithExpirationLease(t)
+	store := tc.GetFirstStoreFromServer(t, 0)
+	repl := store.LookupReplica(roachpb.RKey(key))
+	_, pErr := kv.SendWrapped(ctx, store.TestSender(), getArgs(key))
+	require.NoError(t, pErr.GoError())
+	lease, _ := repl.GetLease()
+
+	// Let the lease expire, and reject every attempt to renew it.
+	manualClock.Increment(lease.Expiration.WallTime - manualClock.UnixNano() + 1)
+	rangeID.Store(int64(repl.RangeID))
+	_, pErr = kv.SendWrapped(ctx, store.TestSender(), getArgs(key))
+	require.True(t, errors.HasType(pErr.GoError(), (*kvpb.NotLeaseHolderError)(nil)), "%v", pErr)
+	require.LessOrEqual(t, rejections.Load(), int64(3))
+}
+
 // TestRangeLocalUncertaintyLimitAfterNewLease verifies that on lease
 // transfer, the normal limiting of a request's local uncertainty limit
 // to the first observed timestamp on a node is extended to include the

@@ -1056,14 +1056,51 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (p *Pebble, err error) {
 
 	// Wrap the FS with disk health-checking and ENOSPC-detection.
 	var filesystemCloser io.Closer
+	// Whether the store is on disk, told before the wrappers hide it.
+	onDisk := fs.OnDisk(opts.FS)
+	// Pebble names the store's files by joining them to its directory, which
+	// cleans the path. Every other use of the directory takes that path too,
+	// so that all of them, also those the system resolves, such as directory
+	// syncs and disk usage, name the same directory. On disk the path is
+	// also made absolute against the working directory as the system has it
+	// (fs.AbsPath), so that a relative path names the directory the system
+	// resolves it to. On an in-memory filesystem, "." is the root, "", where
+	// Pebble's joined names go.
+	if cfg.Dir != "" {
+		cfg.Dir = filepath.Clean(cfg.Dir)
+		if onDisk {
+			if cfg.Dir, err = fs.AbsPath(cfg.Dir); err != nil {
+				return nil, err
+			}
+		} else if _, inMem := vfs.Root(opts.FS).(*vfs.MemFS); inMem && cfg.Dir == "." {
+			cfg.Dir = ""
+		}
+	}
 	opts.FS, filesystemCloser = wrapFilesystemMiddleware(opts)
+	opts.FS = markerSyncFS{FS: opts.FS, dir: cfg.Dir}
 	defer func() {
 		if err != nil {
 			filesystemCloser.Close()
 		}
 	}()
+	// mkdir makes the store and auxiliary directories durable: a store
+	// directory whose entry is lost in a crash loses the whole store. It
+	// works through the wrapped filesystem, with its disk-stall and ENOSPC
+	// handling. A relative path on an in-memory filesystem, which has no
+	// current directory, is only created: MkdirAllStoreDir cleans the
+	// path, and the root, "", would become a directory named ".".
+	mkdir := func(dir string, perm os.FileMode) error {
+		return fs.MkdirAllStoreDir(opts.FS, dir, perm, onDisk)
+	}
+	if !filepath.IsAbs(cfg.Dir) {
+		if _, err := opts.FS.Stat("."); oserror.IsNotExist(err) {
+			mkdir = opts.FS.MkdirAll
+		} else if err != nil {
+			return nil, err
+		}
+	}
 	if !opts.ReadOnly {
-		if err := opts.FS.MkdirAll(cfg.Dir, os.ModePerm); err != nil {
+		if err := mkdir(cfg.Dir, os.ModePerm); err != nil {
 			return nil, err
 		}
 	}
@@ -1134,7 +1171,7 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (p *Pebble, err error) {
 	}
 
 	auxDir := opts.FS.PathJoin(cfg.Dir, base.AuxiliaryDir)
-	if err := opts.FS.MkdirAll(auxDir, 0755); err != nil {
+	if err := mkdir(auxDir, 0755); err != nil {
 		return nil, err
 	}
 	ballastPath := base.EmergencyBallastFile(opts.FS.PathJoin, cfg.Dir)

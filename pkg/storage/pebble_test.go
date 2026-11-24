@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -40,6 +41,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/errors/oserror"
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/objstorage/objstorageprovider"
 	"github.com/cockroachdb/pebble/vfs"
@@ -1676,4 +1678,147 @@ func TestPebbleLoggingSlowReads(t *testing.T) {
 		}
 	}
 	require.Less(t, 0, slowCount)
+}
+
+// TestNewStoreSurvivesCrash checks that a new store is durable once Open
+// returns: a crash right after the first start must not lose the store
+// directory, whose entry in its parent was never synced before.
+func TestNewStoreSurvivesCrash(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	mem := vfs.NewStrictMem()
+	st := cluster.MakeTestingClusterSettings()
+	eng, err := Open(ctx, MakeLocation("/data", mem), st)
+	require.NoError(t, err)
+	eng.Close()
+
+	mem.ResetToSyncedState()
+	eng, err = Open(ctx, MakeLocation("/data", mem), st, MustExist)
+	require.NoError(t, err)
+	eng.Close()
+}
+
+// checkReopen opens a new store at loc, writes a value, closes it, reopens
+// it as an existing store and reads the value back.
+func checkReopen(t *testing.T, loc Location) {
+	t.Helper()
+	ctx := context.Background()
+	st := cluster.MakeTestingClusterSettings()
+	key := roachpb.Key("k")
+	eng, err := Open(ctx, loc, st)
+	require.NoError(t, err)
+	require.NoError(t, eng.PutUnversioned(key, []byte("v")))
+	eng.Close()
+
+	eng, err = Open(ctx, loc, st, MustExist)
+	require.NoError(t, err)
+	defer eng.Close()
+	require.Equal(t, []byte("v"), mvccGetRaw(t, eng, MVCCKey{Key: key}))
+}
+
+// TestOpenCreatesTheStoreItUses checks that Open uses one directory for a
+// path that is not clean, which it cleans as Pebble's joined file names do:
+// with ".." after a symbolic link the system would resolve the path as given
+// to another directory, and an in-memory filesystem would create "." as a
+// directory. The store reopens, and on disk nothing goes behind the link.
+func TestOpenCreatesTheStoreItUses(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	t.Run("disk", func(t *testing.T) {
+		tmp, err := filepath.EvalSymlinks(t.TempDir())
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(filepath.Join(tmp, "disk", "sub"), 0755))
+		require.NoError(t, os.Symlink(filepath.Join(tmp, "disk", "sub"), filepath.Join(tmp, "link")))
+		checkReopen(t, Filesystem(tmp+"/link/../store"))
+		_, err = os.Stat(filepath.Join(tmp, "store", MinVersionFilename))
+		require.NoError(t, err)
+		_, err = os.Stat(filepath.Join(tmp, "disk", "store"))
+		require.True(t, oserror.IsNotExist(err), "%v", err)
+	})
+	t.Run("memory", func(t *testing.T) {
+		checkReopen(t, MakeLocation("/a/./db/", vfs.NewStrictMem()))
+	})
+	t.Run("memory-relative", func(t *testing.T) {
+		checkReopen(t, MakeLocation("a/./db", vfs.NewMem()))
+	})
+	// Paths that clean to ".": the in-memory root.
+	for _, dir := range []string{".", "a/.."} {
+		t.Run("memory-"+dir, func(t *testing.T) {
+			checkReopen(t, MakeLocation(dir, vfs.NewStrictMem()))
+		})
+	}
+	// A relative path from a working directory reached through a link, as
+	// a shell gives it in PWD: ".." is the parent of the directory the
+	// system is in, as for the system itself, whatever PWD says.
+	t.Run("disk-relative-through-link", func(t *testing.T) {
+		tmp, err := filepath.EvalSymlinks(t.TempDir())
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(filepath.Join(tmp, "real", "sub"), 0755))
+		alias := filepath.Join(tmp, "alias")
+		require.NoError(t, os.Symlink(filepath.Join(tmp, "real", "sub"), alias))
+		t.Chdir(alias)
+		t.Setenv("PWD", alias)
+		checkReopen(t, Filesystem("../store"))
+		_, err = os.Stat(filepath.Join(tmp, "real", "store", MinVersionFilename))
+		require.NoError(t, err)
+		_, err = os.Stat(filepath.Join(tmp, "store"))
+		require.True(t, oserror.IsNotExist(err), "%v", err)
+	})
+	// "." on disk, through a wrapper vfs.Root does not see through, is the
+	// working directory, not the in-memory root.
+	t.Run("disk-dot-wrapped", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		fs, closer := vfs.WithDiskHealthChecks(vfs.Default, time.Second, func(vfs.DiskSlowInfo) {})
+		defer closer.Close()
+		checkReopen(t, MakeLocation(".", fs))
+	})
+}
+
+// openDirTracer records the directories opened through it, which are the
+// ones synced, over the filesystem it wraps.
+type openDirTracer struct {
+	vfs.FS
+	opened []string
+}
+
+func (fs *openDirTracer) OpenDir(name string) (vfs.File, error) {
+	fs.opened = append(fs.opened, name)
+	return fs.FS.OpenDir(name)
+}
+
+func (fs *openDirTracer) Unwrap() vfs.FS { return fs.FS }
+
+// TestOpenSyncsLinkDirs checks that Open on disk, not only the CLI before
+// it, syncs the directories that hold the links on the store's path and the
+// parents of the directory the links lead to.
+func TestOpenSyncsLinkDirs(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	// links/first -> ../middle/second, middle/second -> ../bridge/step/../../disk/sub.
+	for _, dir := range []string{"links", "middle", "bridge/step", "disk/sub"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(tmp, dir), 0755))
+	}
+	require.NoError(t, os.Symlink("../middle/second", filepath.Join(tmp, "links", "first")))
+	require.NoError(t, os.Symlink("../bridge/step/../../disk/sub", filepath.Join(tmp, "middle", "second")))
+
+	tracer := &openDirTracer{FS: vfs.Default}
+	eng, err := Open(context.Background(), MakeLocation(filepath.Join(tmp, "links", "first", "store"), tracer),
+		cluster.MakeTestingClusterSettings())
+	require.NoError(t, err)
+	eng.Close()
+	for _, want := range []string{
+		filepath.Join(tmp, "links"),       // holds first
+		filepath.Join(tmp, "middle"),      // holds second
+		filepath.Join(tmp, "bridge"),      // holds step, which second's target passes
+		filepath.Join(tmp, "disk", "sub"), // holds store, on disk
+		filepath.Join(tmp, "disk"),        // holds sub
+	} {
+		require.Contains(t, tracer.opened, want)
+	}
 }

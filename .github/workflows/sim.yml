@@ -5,16 +5,26 @@
 #
 # One job builds the binaries once. Then a matrix of jobs, all submitted at
 # once, each runs a fixed range of seeds in PROCS processes; GitHub queues
-# them and runs as many as the account allows. A seed that fails or runs
-# out of real time is a failure, and its full logs and replay command are
-# uploaded, also when its job fails. The last job counts every assigned
-# seed: a campaign counts only when all of them ran and passed.
+# them and runs as many as the account allows. A seed that fails is a
+# failure, and its full logs and replay command are uploaded, also when its
+# job fails. In a campaign or the planted check, when a time limit ends a
+# seed's run (its CPU time, as when it spins, or its real time), the seed
+# runs once more, at once, and fails only if that run fails too. The first
+# run's logs are uploaded under first-run/, and the summary lists the seed.
+# The last job counts every assigned seed: a campaign counts only when all
+# of them ran and passed.
 #
 # With planted=all, the run instead checks that every planted bug
 # (pkg/util/planted) is caught within its seed budget.
+#
+# With replay=<seed>, and replay-planted=<bug> for a planted bug, the run
+# instead replays that one seed, as build/sim-replay.sh does, and uploads
+# its full log:
+#
+#   gh workflow run sim.yml --ref <ref> -f replay=<seed>
 name: sim
 run-name: >-
-  sim ${{ inputs.planted == 'all' && 'planted bugs' || format('{0} seeds from {1}', inputs.seeds, inputs.first) }}
+  sim ${{ inputs.replay != '' && format('replay of seed {0}', inputs.replay) || inputs.planted == 'all' && 'planted bugs' || format('{0} seeds from {1}', inputs.seeds, inputs.first) }}
 
 on:
   workflow_dispatch:
@@ -31,6 +41,12 @@ on:
       planted:
         description: "'all' checks the planted bugs instead of running a campaign"
         default: ""
+      replay:
+        description: A seed to replay instead of running a campaign
+        default: ""
+      replay-planted:
+        description: The planted bug of the seed to replay, if any
+        default: ""
 
 permissions:
   contents: read
@@ -42,7 +58,8 @@ env:
 
 jobs:
   plan:
-    runs-on: ubuntu-24.04-arm
+    if: inputs.replay == ''
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
@@ -66,19 +83,38 @@ jobs:
           echo "shards=$(seq -s, 0 $((jobs - 1)) | sed 's/^/[/; s/$/]/')" >>"$GITHUB_OUTPUT"
 
   build:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
+    env:
+      # The binary this run needs: with the planted bugs (the tag planted)
+      # or without.
+      VARIANT: ${{ (inputs.replay != '' && inputs.replay-planted != '' || inputs.replay == '' && inputs.planted == 'all') && 'planted' || 'plain' }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-go
       # gosim keeps its translation of each package in this database, so a
       # build translates only the packages that changed since the last one.
       # It is saved even when the build fails, for the next try.
+      #
+      # Each variant has a cache of its own. gosim's key for a package's
+      # translation includes the build tags, so a build with the planted
+      # bugs and one without share no translation. With one cache for both,
+      # a build often restored the cache the other variant saved last, and
+      # had to translate the whole tree, as after a bump of gosim. That
+      # nearly fills the runner's memory: of seven such full translations,
+      # four lost their runner about 57 minutes in (#59; runs 45311336762,
+      # 45311393073, 45345888236, 45353165886), while builds from a cache
+      # of their own variant took about 16 minutes. Until each
+      # variant has saved a cache of its own, it starts from the last full
+      # cache of the old, shared key that holds it: c841e019's (without the
+      # planted bugs) and 67de158c's (with).
       - uses: actions/cache/restore@v4
         with:
           path: .gosim/cache.sqlite3
-          key: sim-gosim-${{ github.sha }}
-          restore-keys: sim-gosim-
+          key: sim-gosim-${{ runner.arch }}-${{ env.VARIANT }}-${{ github.sha }}
+          restore-keys: |
+            sim-gosim-${{ runner.arch }}-${{ env.VARIANT }}-
+            sim-gosim-${{ runner.arch }}-${{ env.VARIANT == 'planted' && '67de158cb90751b1bac7e57132371571658b7485' || 'c841e019c7390b8be8939ebc87639b3df5589dbc' }}
       # Translating the tree peaks near the runner's 16 GB of memory; the
       # swap keeps the kernel from stopping the job.
       - name: Add 8 GB of swap
@@ -88,15 +124,35 @@ jobs:
           sudo mkswap /swap-sim >/dev/null
           sudo swapon /swap-sim
           free -g
-      - run: build/sim-build.sh bin/sim
+      - name: Build the simulator
         env:
-          PLANTED: ${{ inputs.planted == 'all' && '1' || '' }}
-          GOSIM_TRANSLATE_WORKERS: "8"
+          PLANTED: ${{ env.VARIANT == 'planted' && '1' || '' }}
+          # One package translates per CPU (the runner has 4): each holds its
+          # syntax trees. With 8, three builds that translated the whole tree,
+          # as after a bump of gosim, lost their runner about 57 minutes in,
+          # by the look of it out of memory (#59; runs 45223056299,
+          # 45311336762, 45311393073).
+          GOSIM_TRANSLATE_WORKERS: "4"
+        run: |
+          # The runner's memory every 30 seconds, printed as it is taken so
+          # that a lost runner still shows it, and a summary at the end
+          # (build/sim-vm.sh). The diagnostics never change the step's result.
+          vm=build/sim-vm.sh
+          "$vm" report "Runner at the start" || :
+          "$vm" sample "$RUNNER_TEMP/vm.log" echo &
+          sampler=$!
+          trap 'kill $sampler 2>/dev/null || :; wait $sampler 2>/dev/null || :; "$vm" report "Runner at the end" "$RUNNER_TEMP/vm.log" || :' EXIT
+          # Out of memory, the kernel then ends the build rather than the
+          # runner's agent, so that the job fails with its log.
+          for pid in $(pgrep -f 'Runner\.(Listener|Worker)'); do
+            echo -1000 | sudo tee "/proc/$pid/oom_score_adj" >/dev/null || :
+          done
+          build/sim-build.sh bin/sim
       - if: always()
         uses: actions/cache/save@v4
         with:
           path: .gosim/cache.sqlite3
-          key: sim-gosim-${{ github.sha }}
+          key: sim-gosim-${{ runner.arch }}-${{ env.VARIANT }}-${{ github.sha }}
       - uses: actions/upload-artifact@v4
         with:
           name: sim-bin
@@ -104,9 +160,9 @@ jobs:
           retention-days: 7
 
   seeds:
-    if: inputs.planted != 'all'
+    if: inputs.planted != 'all' && inputs.replay == ''
     needs: [plan, build]
-    runs-on: ubuntu-24.04-arm
+    runs-on: [self-hosted, codex]
     timeout-minutes: 345
     strategy:
       fail-fast: false
@@ -118,15 +174,6 @@ jobs:
         with:
           name: sim-bin
           path: bin/sim
-      # A seed process takes about 1.5 GB; one that runs until its real
-      # time is up grows beyond that. The swap keeps the kernel from
-      # stopping the job, which would lose the shard's logs.
-      - name: Add 8 GB of swap
-        run: |
-          sudo fallocate -l 8G /swap-sim
-          sudo chmod 600 /swap-sim
-          sudo mkswap /swap-sim >/dev/null
-          sudo swapon /swap-sim
       - name: Run the shard's seeds
         env:
           SEEDS: ${{ inputs.seeds }}
@@ -136,11 +183,20 @@ jobs:
         run: |
           set -uo pipefail
           chmod +x bin/sim/*.test
+          mkdir -p "$RUNNER_TEMP/out"
+          # The VM's CPUs and memory at the start and the end, and every 30
+          # seconds in out/vm.log, with what shows a stalled VM: gaps between
+          # samples, CPU steal and major page faults (#59, build/sim-vm.sh).
+          vm="$GITHUB_WORKSPACE/build/sim-vm.sh"
+          # The diagnostics never change the step's result.
+          "$vm" report "VM at the start" || :
+          "$vm" sample "$RUNNER_TEMP/out/vm.log" &
+          sampler=$!
+          trap 'kill $sampler 2>/dev/null || :; wait $sampler 2>/dev/null || :; "$vm" report "VM at the end" "$RUNNER_TEMP/out/vm.log" || :' EXIT
           start=$((FIRST + SHARD * PER))
           end=$((FIRST + SEEDS))
           end=$(( start + PER < end ? start + PER : end ))
           per=$(( (end - start + PROCS - 1) / PROCS ))
-          mkdir -p "$RUNNER_TEMP/out"
           cd pkg/sim
           pids=()
           for p in $(seq 0 $((PROCS - 1))); do
@@ -157,7 +213,7 @@ jobs:
           for pid in "${pids[@]}"; do
             wait "$pid" || status=1
           done
-          grep -h -E -- '^--- FAIL|seed [0-9]+ failed|seeds, ' "$RUNNER_TEMP"/out/process-*.log | head -100 || true
+          grep -h -E -- '^--- FAIL|seed [0-9]+ failed|seeds, |so it runs again|ran again: failed' "$RUNNER_TEMP"/out/process-*.log | head -100 || true
           exit $status
       - if: always()
         uses: actions/upload-artifact@v4
@@ -165,10 +221,47 @@ jobs:
           name: sim-out-${{ matrix.shard }}
           path: ${{ runner.temp }}/out
 
+  # The regression test of a store lost in a power loss right after a
+  # node's first start (pkg/sim TestFirstStart): a fixed scenario, not a
+  # seed. Then the test of the limits a seed runs with (TestSeedLimits).
+  first-start:
+    if: inputs.planted != 'all' && inputs.replay == ''
+    needs: [build]
+    runs-on: [self-hosted, codex]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sim-bin
+          path: bin/sim
+      - name: Power loss after the first start
+        run: |
+          chmod +x bin/sim/*.test
+          vm="$GITHUB_WORKSPACE/build/sim-vm.sh"
+          "$vm" report "VM at the start" || :
+          trap '"$vm" report "VM at the end" || :' EXIT
+          cd pkg/sim
+          SIM_BINARY=$GITHUB_WORKSPACE/bin/sim/sim-gosim.test SIM_OUT=$RUNNER_TEMP/out \
+            "$GITHUB_WORKSPACE/bin/sim/sim.test" -test.run '^TestFirstStart$' -test.v -test.timeout 20m
+      - name: The limits of a seed
+        if: always()
+        run: |
+          chmod +x bin/sim/*.test
+          cd pkg/sim
+          SIM_BINARY=$GITHUB_WORKSPACE/bin/sim/sim-gosim.test \
+            "$GITHUB_WORKSPACE/bin/sim/sim.test" -test.run '^TestSeedLimits$' -test.v -test.timeout 10m
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: first-start
+          path: ${{ runner.temp }}/out
+          if-no-files-found: ignore
+
   summary:
-    if: always() && inputs.planted != 'all'
-    needs: [plan, seeds]
-    runs-on: ubuntu-24.04-arm
+    if: always() && inputs.planted != 'all' && inputs.replay == ''
+    needs: [plan, seeds, first-start]
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -182,11 +275,18 @@ jobs:
         run: |
           set -o pipefail
           build/sim-summary.sh out "$FIRST" "$SEEDS" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: The first-start test
+        if: always()
+        env:
+          RESULT: ${{ needs.first-start.result }}
+        run: |
+          echo "TestFirstStart and TestSeedLimits: $RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
+          [[ $RESULT == success ]]
 
   planted:
-    if: inputs.planted == 'all'
+    if: inputs.planted == 'all' && inputs.replay == ''
     needs: [plan, build]
-    runs-on: ubuntu-24.04-arm
+    runs-on: [self-hosted, codex]
     timeout-minutes: 345
     strategy:
       fail-fast: false
@@ -197,7 +297,14 @@ jobs:
           # fail a seed first: it takes more seeds.
           - {bug: lost-sync, budget: 60}
           - {bug: skip-refresh, budget: 30}
-          - {bug: wrong-filter, budget: 30}
+          # A seed catches this bug only when one plan runs an integer >=
+          # (or BETWEEN) as a vectorized filter and drops a row equal to its
+          # bound, which changes the result against the plan it is compared
+          # with (the rows, or an aggregate over them). Seeds 1 to 30
+          # missed it (run 45223056299); runs from seeds 31, 131, 231, 331
+          # and 431 first caught it at seeds 90, 137, 232, 338 and 433 (run
+          # 45240892872).
+          - {bug: wrong-filter, budget: 150}
           - {bug: internal-error, budget: 30}
           - {bug: lost-segment, budget: 30}
     steps:
@@ -220,4 +327,32 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: planted-${{ matrix.bug }}
+          path: ${{ runner.temp }}/out
+
+  # Replays one seed twice on this commit, as build/sim-replay.sh does,
+  # and uploads its full log and artifacts.
+  replay:
+    if: inputs.replay != ''
+    needs: [build]
+    runs-on: [self-hosted, codex]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sim-bin
+          path: bin/sim
+      - name: Replay seed ${{ inputs.replay }}
+        env:
+          SIM_SEED: ${{ inputs.replay }}
+          PATCHROADDB_PLANTED: ${{ inputs.replay-planted }}
+        run: |
+          chmod +x bin/sim/*.test
+          cd pkg/sim
+          SIM_BINARY=$GITHUB_WORKSPACE/bin/sim/sim-gosim.test SIM_OUT=$RUNNER_TEMP/out/replay-$SIM_SEED \
+            "$GITHUB_WORKSPACE/bin/sim/sim.test" -test.run '^TestReplay$' -test.v -test.timeout 60m
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: replay-${{ inputs.replay }}
           path: ${{ runner.temp }}/out

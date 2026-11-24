@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -36,36 +37,75 @@ import (
 
 // seedOutcome is what one gosim run of TestSeed gave.
 type seedOutcome struct {
-	failed     bool
+	failed bool
+	// timedOut is set when a time limit (seedLimits) ended the run.
+	timedOut   bool
 	reason     string
 	cpuSeconds float64
 	wall       time.Duration
-	checksum   []byte
-	log        []byte
-	artifacts  map[string][]byte
+	// steal is the share of the VM's CPU time, in percent, that its
+	// hypervisor took while the run ran, or -1 when it is not known.
+	steal     float64
+	checksum  []byte
+	log       []byte
+	artifacts map[string][]byte
 }
 
-// runSeed runs TestSeed with the seed in a gosim run, ended after wall of
-// real time. With out set, a failing run's log, error and artifacts go to
-// out/seed-<seed>/, with how to replay it.
-func runSeed(
-	t *testing.T, bin string, seed int64, planted string, wall time.Duration, out string,
-) seedOutcome {
-	start := timeutil.Now()
-	// Every run gets the same variables, even an empty one: their number
-	// changes the run.
-	res, err := metatesting.ForTestBinary(t, bin).RunQuiet(&metatesting.RunConfig{
-		Test:     "TestSeed",
+// seedLimits are the limits a seed's gosim run gets. cpu, the CPU time
+// the run's process uses, ends a run that spins: it burns CPU. A run whose
+// process is starved, as on a VM that stalls, uses little CPU, and only
+// wall, the real time, ends it, much later.
+type seedLimits struct {
+	wall, cpu time.Duration
+}
+
+// limits returns the limits of a seed: SIM_WALL_MINUTES of real time
+// (default 20) and SIM_CPU_SECONDS of CPU time (default 300). A healthy
+// seed uses about 10 to 25 CPU-s.
+func limits(t *testing.T) seedLimits {
+	return seedLimits{
+		wall: time.Duration(envInt(t, "SIM_WALL_MINUTES", 20)) * time.Minute,
+		cpu:  time.Duration(envInt(t, "SIM_CPU_SECONDS", 300)) * time.Second,
+	}
+}
+
+// runConfig is the gosim run of test with the seed and the planted bug,
+// at the limits l. Every seed runs with it (runSeed, TestReplay), and
+// TestSeedLimits checks its limits on other tests. Every run gets the same
+// variables, even an empty one: their number changes the run.
+func (l seedLimits) runConfig(test string, seed int64, planted string) *metatesting.RunConfig {
+	return &metatesting.RunConfig{
+		Test:     test,
 		Seed:     seed,
 		ExtraEnv: []string{"PATCHROADDB_PLANTED=" + planted},
-		WallKill: wall,
-	})
-	o := seedOutcome{wall: timeutil.Since(start)}
+		WallKill: l.wall,
+		CPUKill:  l.cpu,
+	}
+}
+
+// runSeed makes the gosim run c, of TestSeed with a seed, ended at its
+// limits (seedLimits), and returns what it gave, with the VM's steal while
+// it ran.
+func runSeed(t *testing.T, bin string, c *metatesting.RunConfig) seedOutcome {
+	start, stat := timeutil.Now(), readCPUStat()
+	res, err := metatesting.ForTestBinary(t, bin).RunQuiet(c)
+	return outcome(res, err, timeutil.Since(start), stealPercent(stat, readCPUStat()))
+}
+
+// outcome is what a gosim run gave: its result and error, real time and
+// steal.
+func outcome(res *metatesting.RunResult, err error, wall time.Duration, steal float64) seedOutcome {
+	o := seedOutcome{wall: wall, steal: steal}
 	switch {
 	case err != nil:
 		o.failed, o.reason = true, fmt.Sprintf("the test binary failed: %v", err)
+	case res.Ended && strings.Contains(res.Err, " passed its limit of "):
+		// gosim's error says which limit the run passed.
+		o.failed, o.timedOut, o.reason = true, true, "timed out: "+res.Err
 	case res.Ended:
-		o.failed, o.reason = true, fmt.Sprintf("timed out after %s of real time: %s", wall, res.Err)
+		// gosim also ends the test binary when it cannot read the run's
+		// CPU time: no limit ended the run.
+		o.failed, o.reason = true, "the test binary ended: "+res.Err
 	case res.Failed:
 		o.failed, o.reason = true, res.Err
 		if o.reason == "" {
@@ -80,19 +120,126 @@ func runSeed(
 			o.cpuSeconds = v
 		}
 	}
-	if o.failed && out != "" {
-		write := saveSeed(t, out, seed, planted, o.reason)
-		if res != nil {
-			// Every simulated machine's output, the nodes' logs included,
-			// one JSON object a line.
-			write("log.jsonl", res.LogOutput)
-			write("log.txt", readableLog(res.LogOutput))
-			for name, data := range res.Artifacts {
-				write("artifact-"+filepath.Base(name), data)
-			}
+	return o
+}
+
+// countedRun runs a seed as it counts (#59), run making one gosim run of
+// it. A run that a time limit ended runs once more, at once: a VM whose
+// hypervisor takes its CPU, or that stalls, can make a healthy seed pass a
+// limit, but a seed that hangs or spins does so again, as gosim runs it the
+// same way each time. gosim ends the test binary of a run that a limit
+// ended, so the second run is in a fresh process of the same binary. The
+// seed fails if the second run also passes a limit, or fails in any other
+// way. Any other failure counts at once: a failed check, a panic, an
+// internal error, a test binary that failed or whose CPU time gosim
+// could not read. So does a run that passed its limit of CPU time only
+// between gosim's last two checks: no limit ended it, and it failed as it
+// ended. keep gets the run that a limit ended before the second run
+// starts, so that it is kept even should the second never run; first is
+// that run, when the seed ran again.
+func countedRun(
+	run func() seedOutcome, keep func(first seedOutcome),
+) (o seedOutcome, first *seedOutcome) {
+	o = run()
+	if !o.timedOut {
+		return o, nil
+	}
+	f := o
+	keep(f)
+	o = run()
+	switch {
+	case o.timedOut:
+		o.reason = fmt.Sprintf("timed out twice; the first run %s; the second %s", f.reason, o.reason)
+	case o.failed:
+		o.reason = fmt.Sprintf("timed out, then failed when run again: %s; the first run %s", o.reason, f.reason)
+	}
+	return o, &f
+}
+
+// runCounted runs TestSeed with the seed as it counts (countedRun), at the
+// limits l. With out set, the run that a time limit ended, when the seed
+// ran again, goes to out/<firstDir>/seed-<seed>/ (save).
+func runCounted(
+	t *testing.T, bin string, l seedLimits, seed int64, planted, out, firstDir string,
+) (o seedOutcome, first *seedOutcome) {
+	o, first = countedRun(func() seedOutcome {
+		return runSeed(t, bin, l.runConfig("TestSeed", seed, planted))
+	}, func(first seedOutcome) {
+		t.Logf("seed %d: a time limit ended its run, with %s steal, so it runs again; the first run %s",
+			seed, fmtSteal(first.steal), first.reason)
+		if out != "" {
+			first.save(t, filepath.Join(out, firstDir), seed, planted)
+		}
+	})
+	if first != nil {
+		t.Logf("seed %d ran again: failed %v", seed, o.failed)
+	}
+	return o, first
+}
+
+// save writes a run of the seed to dir/seed-<seed>/: its error, how to
+// replay it, every simulated machine's output, its artifacts, such as the
+// stacks of a run that a time limit ended, and the VM's steal while it ran.
+func (o seedOutcome) save(t *testing.T, dir string, seed int64, planted string) {
+	write := saveSeed(t, dir, seed, planted, o.reason)
+	// Every simulated machine's output, the nodes' logs included, one JSON
+	// object a line.
+	write("log.jsonl", o.log)
+	write("log.txt", readableLog(o.log))
+	for name, data := range o.artifacts {
+		write("artifact-"+filepath.Base(name), data)
+	}
+	write("vm.txt", []byte(fmt.Sprintf("steal while the run ran: %s; real time: %.1f s\n", fmtSteal(o.steal), o.wall.Seconds())))
+}
+
+// cpuStat is the VM's CPU time so far, in clock ticks (/proc/stat): what
+// its hypervisor took (steal), and in all.
+type cpuStat struct {
+	steal, total int64
+	ok           bool
+}
+
+func readCPUStat() cpuStat {
+	data, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return cpuStat{}
+	}
+	line, _, _ := bytes.Cut(data, []byte("\n"))
+	f := strings.Fields(string(line))
+	// cpu user nice system idle iowait irq softirq steal [guest guest_nice],
+	// where guest time is also in user and nice.
+	if len(f) < 9 || f[0] != "cpu" {
+		return cpuStat{}
+	}
+	var s cpuStat
+	for i, v := range f[1:9] {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return cpuStat{}
+		}
+		s.total += n
+		if i == 7 {
+			s.steal = n
 		}
 	}
-	return o
+	s.ok = true
+	return s
+}
+
+// stealPercent is the share of the VM's CPU time its hypervisor took from a
+// to b, in percent, or -1 when it is not known.
+func stealPercent(a, b cpuStat) float64 {
+	if !a.ok || !b.ok || b.total <= a.total {
+		return -1
+	}
+	return 100 * float64(b.steal-a.steal) / float64(b.total-a.total)
+}
+
+func fmtSteal(steal float64) string {
+	if steal < 0 {
+		return "unknown"
+	}
+	return fmt.Sprintf("%.1f%%", steal)
 }
 
 // saveSeed makes out/seed-<seed>/ for a failing seed, with its error and
@@ -173,19 +320,34 @@ type summary struct {
 	CPUSeconds float64          `json:"cpu_seconds"`
 	WallSecs   float64          `json:"wall_seconds"`
 	Replayed   int64            `json:"replayed"`
+	// SecondRuns are the seeds whose run a time limit ended, so that they
+	// ran again (countedRun).
+	SecondRuns []secondRun `json:"second_runs,omitempty"`
+}
+
+// secondRun is a seed whose run a time limit ended: why, the VM's steal
+// during that run (-1 when not known), and whether the seed failed when it
+// ran again.
+type secondRun struct {
+	Seed         int64   `json:"seed"`
+	FirstReason  string  `json:"first_reason"`
+	StealPercent float64 `json:"steal_percent"`
+	Failed       bool    `json:"failed"`
 }
 
 // TestCampaign runs the seeds SIM_FIRST to SIM_FIRST+SIM_COUNT-1, each a
-// gosim run of its own with SIM_WALL_MINUTES of real time (default 5).
-// Every hundredth seed runs twice and must give the same run. Failing
-// seeds go to SIM_OUT with their logs; the test fails if any seed failed.
+// gosim run of its own with the limits of a seed (seedLimits), counted as
+// countedRun counts it. Every hundredth seed runs twice and must give the
+// same run. Failing seeds go to SIM_OUT with their logs, and the runs a
+// time limit ended to SIM_OUT/first-run/; the test fails if any seed
+// failed.
 func TestCampaign(t *testing.T) {
 	bin := simEnv("SIM_BINARY")
 	if bin == "" {
 		skip.IgnoreLint(t, "SIM_BINARY is not set; build/sim-build.sh builds the binary, sim.yml runs campaigns")
 	}
 	first, count := envInt(t, "SIM_FIRST", 1), envInt(t, "SIM_COUNT", 1)
-	wall := time.Duration(envInt(t, "SIM_WALL_MINUTES", 5)) * time.Minute
+	l := limits(t)
 	out := simEnv("SIM_OUT")
 	planted := simEnv("PATCHROADDB_PLANTED")
 	s := summary{First: first, Count: count, Failed: make(map[int64]string)}
@@ -204,13 +366,28 @@ func TestCampaign(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// noteSecondRun lists a seed that ran again in the summary, and counts
+	// the real time of the run a time limit ended.
+	noteSecondRun := func(seed int64, firstRun *seedOutcome, o seedOutcome) {
+		if firstRun != nil {
+			s.SecondRuns = append(s.SecondRuns, secondRun{
+				Seed: seed, FirstReason: firstRun.reason, StealPercent: firstRun.steal, Failed: o.failed,
+			})
+			s.WallSecs += firstRun.wall.Seconds()
+		}
+	}
 	for seed := first; seed < first+count; seed++ {
-		o := runSeed(t, bin, seed, planted, wall, out)
+		o, firstRun := runCounted(t, bin, l, seed, planted, out, "first-run")
+		noteSecondRun(seed, firstRun, o)
+		if o.failed && out != "" {
+			o.save(t, out, seed, planted)
+		}
 		s.Run++
 		s.CPUSeconds += o.cpuSeconds
 		s.WallSecs += o.wall.Seconds()
 		if !o.failed && seed%100 == 0 {
-			again := runSeed(t, bin, seed, planted, wall, "")
+			again, againFirst := runCounted(t, bin, l, seed, planted, out, "first-run-again")
+			noteSecondRun(seed, againFirst, again)
 			s.Replayed++
 			switch {
 			case again.failed:
@@ -250,35 +427,19 @@ func TestReplay(t *testing.T) {
 		skip.IgnoreLint(t, "SIM_BINARY and SIM_SEED are not set; build/sim-replay.sh replays a seed")
 	}
 	seed := envInt(t, "SIM_SEED", 0)
-	wall := time.Duration(envInt(t, "SIM_WALL_MINUTES", 5)) * time.Minute
+	l := limits(t)
 	planted := simEnv("PATCHROADDB_PLANTED")
 	out := simEnv("SIM_OUT")
 	run := func() *metatesting.RunResult {
-		res, err := metatesting.ForTestBinary(t, bin).RunQuiet(&metatesting.RunConfig{
-			Test: "TestSeed", Seed: seed, ExtraEnv: []string{"PATCHROADDB_PLANTED=" + planted}, WallKill: wall,
-		})
+		res, err := metatesting.ForTestBinary(t, bin).RunQuiet(l.runConfig("TestSeed", seed, planted))
 		if err != nil {
 			t.Fatal(err)
 		}
 		return res
 	}
-	// write saves a run's log as name, and its artifacts, such as the
-	// stacks of a run that passed its real time, beside it.
 	write := func(name string, res *metatesting.RunResult) {
-		if out == "" {
-			return
-		}
-		if err := os.MkdirAll(out, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(out, name), readableLog(res.LogOutput), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		for artifact, data := range res.Artifacts {
-			path := filepath.Join(out, strings.TrimSuffix(name, ".txt")+"-"+filepath.Base(artifact))
-			if err := os.WriteFile(path, data, 0o644); err != nil {
-				t.Fatal(err)
-			}
+		if out != "" {
+			writeRun(t, out, name, res)
 		}
 	}
 	first := run()
@@ -293,6 +454,231 @@ func TestReplay(t *testing.T) {
 	if first.Failed {
 		t.Errorf("seed %d failed: %s", seed, first.Err)
 	}
+}
+
+// writeRun saves a run's log in out as name, and its artifacts, such as the
+// stacks of a run that passed its real time, beside it.
+func writeRun(t *testing.T, out, name string, res *metatesting.RunResult) {
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(out, name), readableLog(res.LogOutput), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for artifact, data := range res.Artifacts {
+		path := filepath.Join(out, strings.TrimSuffix(name, ".txt")+"-"+filepath.Base(artifact))
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestFirstStart runs TestFirstStartPowerLoss, a fixed scenario rather than
+// a seed's: a power loss of every machine right after the cluster's first
+// start, after which each must come back as the node it was.
+func TestFirstStart(t *testing.T) {
+	bin := simEnv("SIM_BINARY")
+	if bin == "" {
+		skip.IgnoreLint(t, "SIM_BINARY is not set; sim.yml runs this test")
+	}
+	res, err := metatesting.ForTestBinary(t, bin).RunQuiet(&metatesting.RunConfig{
+		Test: "TestFirstStartPowerLoss", Seed: 1, ExtraEnv: []string{"PATCHROADDB_PLANTED="}, WallKill: 5 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := simEnv("SIM_OUT"); out != "" && (res.Failed || res.Ended) {
+		writeRun(t, out, "first-start.txt", res)
+	}
+	if res.Failed || res.Ended {
+		t.Errorf("TestFirstStartPowerLoss failed: %s", res.Err)
+	}
+}
+
+// TestSeedLimits checks the limits a seed runs with (seedLimits), and how
+// a seed counts (countedRun), on the translated test binary. A seed that
+// spins passes its limit of CPU time in both its runs and fails as a
+// timeout, with every goroutine's stack. A run whose process is starved of
+// CPU, as on a VM that stalls, outlives its limit of CPU time in real time
+// and still passes. A seed whose first run a stall ends past its limit of
+// real time, and whose second passes, does not fail.
+func TestSeedLimits(t *testing.T) {
+	bin := simEnv("SIM_BINARY")
+	if bin == "" {
+		skip.IgnoreLint(t, "SIM_BINARY is not set; sim.yml runs this test")
+	}
+	// The limits of a seed, made short: 10 s of CPU time, and 2 minutes of
+	// real time as the backstop, should the limit of CPU time not work.
+	l := seedLimits{wall: 2 * time.Minute, cpu: 10 * time.Second}
+	config := func(test string, extra ...string) *metatesting.RunConfig {
+		c := l.runConfig(test, 1, "")
+		c.ExtraEnv = append(c.ExtraEnv, extra...)
+		return c
+	}
+
+	// TestSpin never yields: only the limit of CPU time can end it here. It
+	// does so in both runs that a seed gets (countedRun), so it fails.
+	// runs are the seed's runs, as they came, before countedRun counts them.
+	var runs []seedOutcome
+	kept := 0
+	keep := func(seedOutcome) { kept++ }
+	o, first := countedRun(func() seedOutcome {
+		runs = append(runs, runSeed(t, bin, config("TestSpin", "SIM_SPIN=1")))
+		return runs[len(runs)-1]
+	}, keep)
+	spun := func(o seedOutcome) bool {
+		return o.timedOut && strings.HasPrefix(o.reason, "timed out: ") &&
+			strings.Contains(o.reason, "passed its limit of 10s of CPU time") &&
+			strings.Contains(string(o.artifacts["gosim-stacks.txt"]), "TestSpin")
+	}
+	if len(runs) != 2 || !spun(runs[0]) || !spun(runs[1]) || first == nil || kept != 1 ||
+		!o.failed || !strings.HasPrefix(o.reason, "timed out twice; ") {
+		t.Errorf("a spinning seed: %d runs (%+v), failed %v, reason %q", len(runs), runs, o.failed, o.reason)
+	}
+
+	// TestSpinFor uses 6 s of CPU time. Its process is stopped for 20 s of
+	// real time while it runs, longer than its limit of CPU time, which it
+	// must not pass. The run saves whether its limit of real time, 15 s,
+	// passed by the end of its spin: a stop during the run makes it so, as
+	// would a machine that starves it.
+	c := config("TestSpinFor", "SIM_SPIN=1", "SIM_SPIN_SECONDS=6")
+	c.WallLimit = 15 * time.Second
+	starved, err := runStopped(t, bin, c, 20*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if starved.Failed || starved.Ended {
+		t.Errorf("a starved run failed: ended %v, err %q", starved.Ended, starved.Err)
+	}
+	if got := string(starved.Artifacts["wall-passed"]); got != "true" {
+		t.Errorf("the run's limit of real time had not passed by the end of its spin (wall-passed %q): its process was not stopped while it ran", got)
+	}
+
+	// TestSpinFor again, as a seed whose first run a VM stalls past its
+	// limit of real time: its process is stopped for 40 s, past its limit
+	// of 30 s, which ends the run as soon as it goes on. The second run is
+	// not stopped and passes, so the seed does not fail.
+	stalled := config("TestSpinFor", "SIM_SPIN=1", "SIM_SPIN_SECONDS=6")
+	stalled.WallKill = 30 * time.Second
+	runs, kept = nil, 0
+	o, first = countedRun(func() seedOutcome {
+		if len(runs) == 0 {
+			res, err := runStopped(t, bin, stalled, 40*time.Second)
+			runs = append(runs, outcome(res, err, 0, -1))
+		} else {
+			runs = append(runs, runSeed(t, bin, stalled))
+		}
+		return runs[len(runs)-1]
+	}, keep)
+	// TestSpinFor saves wall-passed once its spin ends: a second run that
+	// skipped it would pass without it.
+	_, spunAgain := o.artifacts["wall-passed"]
+	if len(runs) != 2 || !runs[0].timedOut || !strings.Contains(runs[0].reason, "passed its limit of 30s of real time") ||
+		first == nil || kept != 1 || o.failed || !spunAgain {
+		t.Errorf("a seed whose first run a stall ended: %d runs (%+v), failed %v, reason %q", len(runs), runs, o.failed, o.reason)
+	}
+}
+
+// runStopped makes the gosim run c, and stops its process for stop once the
+// run used 3 s of CPU time, as a VM that stalls would.
+func runStopped(
+	t *testing.T, bin string, c *metatesting.RunConfig, stop time.Duration,
+) (*metatesting.RunResult, error) {
+	// The test binary starts here, if it is not running yet, before the
+	// run: until the run, nothing waits for it, so its pid stays its own,
+	// even should it end, until the handle to it (a pidfd), which a
+	// recycled pid cannot redirect, is open.
+	runner := metatesting.ForTestBinary(t, bin)
+	proc, err := os.FindProcess(childOf(t, os.Getpid(), bin))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// FindProcess falls back to the bare pid when it cannot open a pidfd.
+	if err := proc.WithHandle(func(uintptr) {}); err != nil {
+		t.Fatalf("no pidfd for the test binary: %v", err)
+	}
+	// The binary may have run before: the run's CPU time is what it uses
+	// from now.
+	base := cpuOf(t, proc.Pid)
+	var res *metatesting.RunResult
+	var runErr error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		res, runErr = runner.RunQuiet(c)
+	}()
+	for deadline := timeutil.Now().Add(5 * time.Minute); cpuOf(t, proc.Pid)-base < 3*time.Second; time.Sleep(10 * time.Millisecond) {
+		select {
+		case <-done:
+			t.Fatal("the run ended before its process was stopped")
+		default:
+		}
+		if timeutil.Now().After(deadline) {
+			t.Fatal("the run did not spin")
+		}
+	}
+	if err := proc.Signal(syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = proc.Signal(syscall.SIGCONT) }()
+	time.Sleep(stop)
+	if err := proc.Signal(syscall.SIGCONT); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	return res, runErr
+}
+
+// procStat returns the fields of /proc/<pid>/stat after the command, which
+// is in parentheses: the state, the parent's pid, and so on.
+func procStat(pid int) []string {
+	stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return nil
+	}
+	return strings.Fields(string(stat[bytes.LastIndexByte(stat, ')')+1:]))
+}
+
+// cpuOf returns the CPU time the process pid used so far.
+func cpuOf(t *testing.T, pid int) time.Duration {
+	f := procStat(pid)
+	if len(f) < 13 {
+		t.Fatalf("no process %d", pid)
+	}
+	// utime and stime, in clock ticks of 1/100 s.
+	utime, _ := strconv.ParseInt(f[11], 10, 64)
+	stime, _ := strconv.ParseInt(f[12], 10, 64)
+	return time.Duration(utime+stime) * 10 * time.Millisecond
+}
+
+// childOf waits for a running child process of parent whose executable is
+// bin, and returns its pid.
+func childOf(t *testing.T, parent int, bin string) int {
+	want, err := filepath.EvalSymlinks(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for deadline := timeutil.Now().Add(time.Minute); timeutil.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		procs, err := os.ReadDir("/proc")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range procs {
+			pid, err := strconv.Atoi(p.Name())
+			if err != nil {
+				continue
+			}
+			fields := procStat(pid)
+			if len(fields) < 2 || fields[0] == "Z" || fields[1] != strconv.Itoa(parent) {
+				continue
+			}
+			if exe, err := os.Readlink(filepath.Join("/proc", p.Name(), "exe")); err == nil && exe == want {
+				return pid
+			}
+		}
+	}
+	t.Fatalf("no running child of %d runs %s", parent, bin)
+	return 0
 }
 
 // plantedChecks is, for each planted bug, whether a failing run's log
@@ -364,10 +750,13 @@ func TestPlanted(t *testing.T) {
 		t.Fatalf("no check is known for the planted bug %q", bug)
 	}
 	first, count := envInt(t, "SIM_FIRST", 1), envInt(t, "SIM_COUNT", 20)
-	wall := time.Duration(envInt(t, "SIM_WALL_MINUTES", 5)) * time.Minute
+	l := limits(t)
 	out := simEnv("SIM_OUT")
 	for seed := first; seed < first+count; seed++ {
-		o := runSeed(t, bin, seed, bug, wall, out)
+		o, _ := runCounted(t, bin, l, seed, bug, out, "first-run")
+		if o.failed && out != "" {
+			o.save(t, out, seed, bug)
+		}
 		if !o.failed {
 			t.Logf("%s: seed %d passed", bug, seed)
 			continue
@@ -384,7 +773,10 @@ func TestPlanted(t *testing.T) {
 		if out != "" {
 			withoutOut = filepath.Join(out, "without-bug")
 		}
-		without := runSeed(t, bin, seed, "", wall, withoutOut)
+		without, _ := runCounted(t, bin, l, seed, "", withoutOut, "first-run")
+		if without.failed && withoutOut != "" {
+			without.save(t, withoutOut, seed, "")
+		}
 		if without.failed {
 			t.Logf("%s: seed %d fails without the bug too: %s", bug, seed, without.reason)
 			continue
@@ -435,5 +827,103 @@ func TestPlantedChecks(t *testing.T) {
 	}
 	if plantedChecks[planted.LostSync](append(raft("n3"), fatal...)) {
 		t.Error("n2's log.Fatal counts for lost-sync on n3's Raft check")
+	}
+}
+
+// TestCountedRun checks how a seed counts (countedRun): a run that a time
+// limit ended runs once more, and only then fails, while any other
+// failure counts at once.
+func TestCountedRun(t *testing.T) {
+	timedOut := seedOutcome{failed: true, timedOut: true, reason: "timed out: the run passed its limit of 5m0s of CPU time"}
+	failedCheck := seedOutcome{failed: true, reason: "results differ"}
+	passed := seedOutcome{}
+	for _, tc := range []struct {
+		name       string
+		runs       []seedOutcome
+		wantRuns   int
+		wantFailed bool
+		wantReason string
+	}{
+		{name: "passes", runs: []seedOutcome{passed}, wantRuns: 1},
+		{name: "fails a check", runs: []seedOutcome{failedCheck}, wantRuns: 1, wantFailed: true, wantReason: "results differ"},
+		{name: "timed out, then passes", runs: []seedOutcome{timedOut, passed}, wantRuns: 2},
+		{name: "times out twice", runs: []seedOutcome{timedOut, timedOut}, wantRuns: 2, wantFailed: true,
+			wantReason: "timed out twice; the first run " + timedOut.reason + "; the second " + timedOut.reason},
+		{name: "timed out, then fails a check", runs: []seedOutcome{timedOut, failedCheck}, wantRuns: 2, wantFailed: true,
+			wantReason: "timed out, then failed when run again: results differ; the first run " + timedOut.reason},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runs, kept := 0, 0
+			o, first := countedRun(func() seedOutcome {
+				runs++
+				if runs > len(tc.runs) {
+					t.Fatalf("run %d: the seed ran again", runs)
+				}
+				if runs == 2 && kept != 1 {
+					t.Fatal("the seed ran again before its first run was kept")
+				}
+				return tc.runs[runs-1]
+			}, func(f seedOutcome) {
+				kept++
+				if f.reason != timedOut.reason {
+					t.Errorf("kept %+v", f)
+				}
+			})
+			if kept != tc.wantRuns-1 {
+				t.Errorf("kept %d runs, want %d", kept, tc.wantRuns-1)
+			}
+			if runs != tc.wantRuns || o.failed != tc.wantFailed || (tc.wantFailed && o.reason != tc.wantReason) {
+				t.Errorf("%d runs, failed %v, reason %q; want %d runs, failed %v, reason %q",
+					runs, o.failed, o.reason, tc.wantRuns, tc.wantFailed, tc.wantReason)
+			}
+			if (first != nil) != (tc.wantRuns == 2) || (first != nil && first.reason != timedOut.reason) {
+				t.Errorf("first run %+v", first)
+			}
+		})
+	}
+}
+
+// TestOutcome checks which failed runs count as timed out: only those a
+// limit ended. One whose CPU time gosim could not read counts at once, and
+// so does one that passed its limit of CPU time only between gosim's last
+// two checks, which gosim did not end.
+func TestOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		ended        bool
+		err          string
+		wantTimedOut bool
+	}{
+		{true, "the run of TestSeed with seed 7 passed its limit of 5m0s of CPU time; the stack of every goroutine is in the artifact gosim-stacks.txt", true},
+		{true, "the run of TestSeed with seed 7 passed its limit of 20m0s of real time without yielding; the stack of every goroutine is in the artifact gosim-stacks.txt", true},
+		{true, "the run of TestSeed with seed 7 its CPU time could not be read: no rusage; the stack of every goroutine is in the artifact gosim-stacks.txt", false},
+		{false, "the run of TestSeed with seed 7 passed its limit of 5m0s of CPU time", false},
+	} {
+		o := outcome(&metatesting.RunResult{Failed: true, Ended: tc.ended, Err: tc.err}, nil, 0, -1)
+		if !o.failed || o.timedOut != tc.wantTimedOut {
+			t.Errorf("%q: failed %v, timed out %v; want timed out %v", tc.err, o.failed, o.timedOut, tc.wantTimedOut)
+		}
+		runs, wantRuns := 0, 1
+		if tc.wantTimedOut {
+			wantRuns = 2
+		}
+		countedRun(func() seedOutcome { runs++; return o }, func(seedOutcome) {})
+		if runs != wantRuns {
+			t.Errorf("%q: %d runs, want %d", tc.err, runs, wantRuns)
+		}
+	}
+}
+
+// TestStealPercent checks the share of the VM's CPU time its hypervisor
+// took between two readings of /proc/stat.
+func TestStealPercent(t *testing.T) {
+	a := cpuStat{steal: 100, total: 1000, ok: true}
+	if got := stealPercent(a, cpuStat{steal: 400, total: 2000, ok: true}); got != 30 {
+		t.Errorf("steal %v%%, want 30%%", got)
+	}
+	if got := stealPercent(a, cpuStat{}); got != -1 {
+		t.Errorf("steal %v%% without a second reading, want -1", got)
+	}
+	if s := readCPUStat(); s.ok && (s.total <= 0 || s.steal < 0 || s.steal > s.total) {
+		t.Errorf("/proc/stat read as %+v", s)
 	}
 }
