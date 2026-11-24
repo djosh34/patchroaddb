@@ -366,31 +366,35 @@ func TestSeedLimits(t *testing.T) {
 		t.Errorf("a spinning run: failed %v, ended %v, err %q", res.Failed, res.Ended, res.Err)
 	}
 
-	// TestSpinFor uses 4 s of CPU time. Its process is stopped for 15 s of
-	// real time while it runs, longer than the limit of CPU time, which it
-	// must not pass.
+	// TestSpinFor uses 6 s of CPU time. Its process is stopped for 20 s of
+	// real time while it runs, longer than its limit of CPU time, which it
+	// must not pass. The run saves whether its limit of real time, 15 s,
+	// passed by the end of its spin: only a stop during the run makes it so.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		res, err = metatesting.ForTestBinary(t, bin).RunQuiet(&metatesting.RunConfig{
-			Test: "TestSpinFor", Seed: 1, ExtraEnv: []string{"SIM_SPIN=1", "SIM_SPIN_SECONDS=4"},
-			WallKill: time.Hour, CPUKill: cpu,
+			Test: "TestSpinFor", Seed: 1, ExtraEnv: []string{"SIM_SPIN=1", "SIM_SPIN_SECONDS=6"},
+			WallLimit: 15 * time.Second, WallKill: time.Hour, CPUKill: cpu,
 		})
 	}()
 	pid := childOf(t, os.Getpid(), bin)
-	// Stop it once it spins: it has used 2 s of CPU time.
-	for cpuOf(t, pid) < 2*time.Second {
-		time.Sleep(10 * time.Millisecond)
+	// Stop it once it spins: it has used 3 s of CPU time.
+	for deadline := timeutil.Now().Add(5 * time.Minute); cpuOf(t, pid) < 3*time.Second; time.Sleep(10 * time.Millisecond) {
+		select {
+		case <-done:
+			t.Fatal("the run ended before its process was stopped")
+		default:
+		}
+		if timeutil.Now().After(deadline) {
+			t.Fatal("the run did not spin")
+		}
 	}
 	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(15 * time.Second)
-	select {
-	case <-done:
-		t.Fatal("the run ended before its process was stopped")
-	default:
-	}
+	defer func() { _ = syscall.Kill(pid, syscall.SIGCONT) }()
+	time.Sleep(20 * time.Second)
 	if err := syscall.Kill(pid, syscall.SIGCONT); err != nil {
 		t.Fatal(err)
 	}
@@ -400,6 +404,9 @@ func TestSeedLimits(t *testing.T) {
 	}
 	if res.Failed || res.Ended {
 		t.Errorf("a starved run failed: ended %v, err %q", res.Ended, res.Err)
+	}
+	if got := string(res.Artifacts["wall-passed"]); got != "true" {
+		t.Errorf("the run's limit of real time had not passed by the end of its spin (wall-passed %q): its process was not stopped while it ran", got)
 	}
 }
 

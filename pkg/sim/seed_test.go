@@ -16,12 +16,13 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
-	"os"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/sim/fakes3"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
+	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/jellevandenhooff/gosim"
 )
 
@@ -119,10 +120,12 @@ func TestFirstStartPowerLoss(t *testing.T) {
 // TestSpin and TestSpinFor are not seeds: TestSeedLimits runs them to
 // check the limits a seed runs with. TestSpin never yields, as a
 // simulation that hangs in a busy loop. TestSpinFor uses SIM_SPIN_SECONDS
-// of CPU time, without yielding, and then passes.
+// of CPU time without yielding, then saves the artifact wall-passed: true
+// if the run's limit of real time (RunConfig.WallLimit) has passed by
+// then, which shows that its process was stopped while it ran.
 func TestSpin(t *testing.T) {
-	if os.Getenv("SIM_SPIN") != "1" {
-		t.Skip("TestSeedLimits runs this")
+	if v, _ := envutil.ExternalEnvString("SIM_SPIN", 0); v != "1" {
+		skip.IgnoreLint(t, "TestSeedLimits runs this")
 	}
 	for n := 0; ; n++ {
 		_ = n
@@ -130,10 +133,11 @@ func TestSpin(t *testing.T) {
 }
 
 func TestSpinFor(t *testing.T) {
-	if os.Getenv("SIM_SPIN") != "1" {
-		t.Skip("TestSeedLimits runs this")
+	if v, _ := envutil.ExternalEnvString("SIM_SPIN", 0); v != "1" {
+		skip.IgnoreLint(t, "TestSeedLimits runs this")
 	}
-	secs, err := strconv.Atoi(os.Getenv("SIM_SPIN_SECONDS"))
+	v, _ := envutil.ExternalEnvString("SIM_SPIN_SECONDS", 0)
+	secs, err := strconv.Atoi(v)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +151,8 @@ func TestSpinFor(t *testing.T) {
 			t.Fatal(err)
 		}
 		if now-start >= time.Duration(secs)*time.Second {
-			return
+			break
 		}
 	}
+	gosim.WriteArtifact("wall-passed", []byte(strconv.FormatBool(gosim.WallLimitPassed())))
 }
