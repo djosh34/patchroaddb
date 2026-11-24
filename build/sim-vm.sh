@@ -31,13 +31,17 @@ report)
   fi
   ;;
 sample)
+  # A kill also stops the sleep under way, so that nothing is left holding
+  # the step's output open.
+  trap 'kill $! 2>/dev/null; exit 0' TERM
   while :; do
     avail=$(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo)
     cpu=$(awk '/^cpu / { t = 0; for (i = 2; i <= NF; i++) t += $i; print $9, t }' /proc/stat)
     majflt=$(awk '/^pgmajfault / { print $2 }' /proc/vmstat)
     psi=$(awk '{ printf "%s_%s ", $1, $2 }' /proc/pressure/memory 2>/dev/null)
     echo "$(date +%s) $avail $cpu $majflt $psi" >>"$2"
-    sleep 30
+    sleep 30 &
+    wait $!
   done
   ;;
 *)

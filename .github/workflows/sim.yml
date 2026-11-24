@@ -145,10 +145,11 @@ jobs:
           # seconds in out/vm.log, with what shows a stalled VM: gaps between
           # samples, CPU steal and major page faults (#59, build/sim-vm.sh).
           vm="$GITHUB_WORKSPACE/build/sim-vm.sh"
-          "$vm" report "VM at the start"
+          # The diagnostics never change the step's result.
+          "$vm" report "VM at the start" || :
           "$vm" sample "$RUNNER_TEMP/out/vm.log" &
           sampler=$!
-          trap 'kill $sampler 2>/dev/null; "$vm" report "VM at the end" "$RUNNER_TEMP/out/vm.log"' EXIT
+          trap 'kill $sampler 2>/dev/null || :; "$vm" report "VM at the end" "$RUNNER_TEMP/out/vm.log" || :' EXIT
           start=$((FIRST + SHARD * PER))
           end=$((FIRST + SEEDS))
           end=$(( start + PER < end ? start + PER : end ))
@@ -195,8 +196,8 @@ jobs:
         run: |
           chmod +x bin/sim/*.test
           vm="$GITHUB_WORKSPACE/build/sim-vm.sh"
-          "$vm" report "VM at the start"
-          trap '"$vm" report "VM at the end"' EXIT
+          "$vm" report "VM at the start" || :
+          trap '"$vm" report "VM at the end" || :' EXIT
           cd pkg/sim
           SIM_BINARY=$GITHUB_WORKSPACE/bin/sim/sim-gosim.test SIM_OUT=$RUNNER_TEMP/out \
             "$GITHUB_WORKSPACE/bin/sim/sim.test" -test.run '^TestFirstStart$' -test.v -test.timeout 20m
