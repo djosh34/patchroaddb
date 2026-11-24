@@ -377,7 +377,8 @@ func TestSeedLimits(t *testing.T) {
 	// TestSpinFor uses 6 s of CPU time. Its process is stopped for 20 s of
 	// real time while it runs, longer than its limit of CPU time, which it
 	// must not pass. The run saves whether its limit of real time, 15 s,
-	// passed by the end of its spin: only a stop during the run makes it so.
+	// passed by the end of its spin: a stop during the run makes it so, as
+	// would a machine that starves it.
 	//
 	// The test binary starts here, before the run: until the run, nothing
 	// waits for it, so its pid stays its own, even should it end, until the
@@ -387,6 +388,10 @@ func TestSeedLimits(t *testing.T) {
 	proc, err := os.FindProcess(childOf(t, os.Getpid(), bin))
 	if err != nil {
 		t.Fatal(err)
+	}
+	// FindProcess falls back to the bare pid when it cannot open a pidfd.
+	if err := proc.WithHandle(func(uintptr) {}); err != nil {
+		t.Fatalf("no pidfd for the test binary: %v", err)
 	}
 	var starved *metatesting.RunResult
 	var starvedErr error
