@@ -881,19 +881,22 @@ func TestCountedRun(t *testing.T) {
 	}
 }
 
-// TestOutcome checks which ended runs count as timed out: only those that
-// passed a limit, not one whose CPU time gosim could not read, which
-// counts at once.
+// TestOutcome checks which failed runs count as timed out: only those a
+// limit ended. One whose CPU time gosim could not read counts at once, and
+// so does one that passed its limit of CPU time only between gosim's last
+// two checks, which gosim did not end.
 func TestOutcome(t *testing.T) {
 	for _, tc := range []struct {
+		ended        bool
 		err          string
 		wantTimedOut bool
 	}{
-		{"the run of TestSeed with seed 7 passed its limit of 5m0s of CPU time; the stack of every goroutine is in the artifact gosim-stacks.txt", true},
-		{"the run of TestSeed with seed 7 passed its limit of 20m0s of real time without yielding; the stack of every goroutine is in the artifact gosim-stacks.txt", true},
-		{"the run of TestSeed with seed 7 its CPU time could not be read: no rusage; the stack of every goroutine is in the artifact gosim-stacks.txt", false},
+		{true, "the run of TestSeed with seed 7 passed its limit of 5m0s of CPU time; the stack of every goroutine is in the artifact gosim-stacks.txt", true},
+		{true, "the run of TestSeed with seed 7 passed its limit of 20m0s of real time without yielding; the stack of every goroutine is in the artifact gosim-stacks.txt", true},
+		{true, "the run of TestSeed with seed 7 its CPU time could not be read: no rusage; the stack of every goroutine is in the artifact gosim-stacks.txt", false},
+		{false, "the run of TestSeed with seed 7 passed its limit of 5m0s of CPU time", false},
 	} {
-		o := outcome(&metatesting.RunResult{Failed: true, Ended: true, Err: tc.err}, nil, 0, -1)
+		o := outcome(&metatesting.RunResult{Failed: true, Ended: tc.ended, Err: tc.err}, nil, 0, -1)
 		if !o.failed || o.timedOut != tc.wantTimedOut {
 			t.Errorf("%q: failed %v, timed out %v; want timed out %v", tc.err, o.failed, o.timedOut, tc.wantTimedOut)
 		}
