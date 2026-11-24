@@ -99,11 +99,12 @@ jobs:
       # Each variant has a cache of its own. gosim's key for a package's
       # translation includes the build tags, so a build with the planted
       # bugs and one without share no translation. With one cache for both,
-      # a build restored whichever the other variant saved last, and had to
-      # translate the whole tree, which nearly fills the runner's memory:
-      # four such builds lost their runner about 57 minutes in (#59; runs
-      # 45311336762, 45311393073, 45345888236, 45353165886), while builds
-      # from a cache of their own variant took about 16 minutes. Until each
+      # a build often restored the cache the other variant saved last, and
+      # had to translate the whole tree, as after a bump of gosim. That
+      # nearly fills the runner's memory: of seven such full translations,
+      # four lost their runner about 57 minutes in (#59; runs 45311336762,
+      # 45311393073, 45345888236, 45353165886), while builds from a cache
+      # of their own variant took about 16 minutes. Until each
       # variant has saved a cache of its own, it starts from the last full
       # cache of the old, shared key that holds it: c841e019's (without the
       # planted bugs) and 67de158c's (with).
