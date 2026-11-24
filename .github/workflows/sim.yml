@@ -85,17 +85,35 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    env:
+      # The binary this run needs: with the planted bugs (the tag planted)
+      # or without.
+      VARIANT: ${{ (inputs.replay != '' && inputs.replay-planted != '' || inputs.replay == '' && inputs.planted == 'all') && 'planted' || 'plain' }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-go
       # gosim keeps its translation of each package in this database, so a
       # build translates only the packages that changed since the last one.
       # It is saved even when the build fails, for the next try.
+      #
+      # Each variant has a cache of its own. gosim's key for a package's
+      # translation includes the build tags, so a build with the planted
+      # bugs and one without share no translation. With one cache for both,
+      # a build restored whichever the other variant saved last, and had to
+      # translate the whole tree, which nearly fills the runner's memory:
+      # four such builds lost their runner about 57 minutes in (#59; runs
+      # 45311336762, 45311393073, 45345888236, 45353165886), while builds
+      # from a cache of their own variant took about 16 minutes. Until each
+      # variant has saved a cache of its own, it starts from the last full
+      # cache of the old, shared key that holds it: c841e019's (without the
+      # planted bugs) and 67de158c's (with).
       - uses: actions/cache/restore@v4
         with:
           path: .gosim/cache.sqlite3
-          key: sim-gosim-${{ runner.arch }}-${{ github.sha }}
-          restore-keys: sim-gosim-${{ runner.arch }}-
+          key: sim-gosim-${{ runner.arch }}-${{ env.VARIANT }}-${{ github.sha }}
+          restore-keys: |
+            sim-gosim-${{ runner.arch }}-${{ env.VARIANT }}-
+            sim-gosim-${{ runner.arch }}-${{ env.VARIANT == 'planted' && '67de158cb90751b1bac7e57132371571658b7485' || 'c841e019c7390b8be8939ebc87639b3df5589dbc' }}
       # Translating the tree peaks near the runner's 16 GB of memory; the
       # swap keeps the kernel from stopping the job.
       - name: Add 8 GB of swap
@@ -107,7 +125,7 @@ jobs:
           free -g
       - name: Build the simulator
         env:
-          PLANTED: ${{ (inputs.replay != '' && inputs.replay-planted != '' || inputs.replay == '' && inputs.planted == 'all') && '1' || '' }}
+          PLANTED: ${{ env.VARIANT == 'planted' && '1' || '' }}
           # One package translates per CPU (the runner has 4): each holds its
           # syntax trees. With 8, three builds that translated the whole tree,
           # as after a bump of gosim, lost their runner about 57 minutes in,
@@ -133,7 +151,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .gosim/cache.sqlite3
-          key: sim-gosim-${{ runner.arch }}-${{ github.sha }}
+          key: sim-gosim-${{ runner.arch }}-${{ env.VARIANT }}-${{ github.sha }}
       - uses: actions/upload-artifact@v4
         with:
           name: sim-bin
