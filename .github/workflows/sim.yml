@@ -102,10 +102,30 @@ jobs:
           sudo mkswap /swap-sim >/dev/null
           sudo swapon /swap-sim
           free -g
-      - run: build/sim-build.sh bin/sim
+      - name: Build the simulator
         env:
           PLANTED: ${{ (inputs.replay != '' && inputs.replay-planted != '' || inputs.replay == '' && inputs.planted == 'all') && '1' || '' }}
-          GOSIM_TRANSLATE_WORKERS: "8"
+          # One package translates per CPU (the runner has 4): each holds its
+          # syntax trees. With 8, three builds that translated the whole tree,
+          # as after a bump of gosim, lost their runner about 57 minutes in,
+          # by the look of it out of memory (#59; runs 45223056299,
+          # 45311336762, 45311393073).
+          GOSIM_TRANSLATE_WORKERS: "4"
+        run: |
+          # The runner's memory every 30 seconds, printed as it is taken so
+          # that a lost runner still shows it, and a summary at the end
+          # (build/sim-vm.sh). The diagnostics never change the step's result.
+          vm=build/sim-vm.sh
+          "$vm" report "Runner at the start" || :
+          "$vm" sample "$RUNNER_TEMP/vm.log" echo &
+          sampler=$!
+          trap 'kill $sampler 2>/dev/null || :; wait $sampler 2>/dev/null || :; "$vm" report "Runner at the end" "$RUNNER_TEMP/vm.log" || :' EXIT
+          # Out of memory, the kernel then ends the build rather than the
+          # runner's agent, so that the job fails with its log.
+          for pid in $(pgrep -f 'Runner\.(Listener|Worker)'); do
+            echo -1000 | sudo tee "/proc/$pid/oom_score_adj" >/dev/null || :
+          done
+          build/sim-build.sh bin/sim
       - if: always()
         uses: actions/cache/save@v4
         with:

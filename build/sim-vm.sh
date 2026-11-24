@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # Shows the CPUs, memory and memory pressure of the machine a simulator job
-# runs on, for sim.yml's jobs on Codex runners (#59).
+# runs on, for sim.yml's jobs (#59).
 #
 # Usage:
 #   build/sim-vm.sh report <label> [samples]
 #     prints nproc, free -m and /proc/pressure/memory; with a samples file,
 #     also what the samples show: the lowest available memory, the longest
 #     gap between two samples (a machine that stalls shows one), the CPU
-#     time the hypervisor took (steal) and the major page faults.
-#   build/sim-vm.sh sample <samples>
+#     time the hypervisor took (steal), the major page faults and the most
+#     swap used.
+#   build/sim-vm.sh sample <samples> [echo]
 #     appends a sample to the file every 30 seconds, until it is killed:
 #     the time in seconds, the available memory in MiB, the steal and
-#     total CPU ticks, the major page faults and the memory pressure.
+#     total CPU ticks, the major page faults, the swap used in MiB and the
+#     memory pressure. With echo, it also prints each sample, with the
+#     three processes that use the most memory, so that a job whose machine
+#     is lost still shows them in its log.
 set -u
 
 case ${1:-} in
@@ -24,10 +28,11 @@ report)
   if [[ -s ${3:-} ]]; then
     awk 'NR == 1 { t0 = $1; s0 = $3; c0 = $4; f0 = $5 }
          { if (min == "" || $2 < min) { min = $2; at = $1 - t0 }
+           if ($6 > swap) swap = $6
            if (NR > 1 && $1 - prev > gap) { gap = $1 - prev; gat = prev - t0 }
            prev = $1; s = $3; c = $4; f = $5 }
-         END { printf "%d samples over %d s; lowest available memory %d MiB at %d s; longest gap between samples %d s, after %d s; steal %.1f%% of CPU time; %d major page faults\n",
-                 NR, prev - t0, min, at, gap, gat, (c > c0 ? 100 * (s - s0) / (c - c0) : 0), f - f0 }' "$3"
+         END { printf "%d samples over %d s; lowest available memory %d MiB at %d s; most swap used %d MiB; longest gap between samples %d s, after %d s; steal %.1f%% of CPU time; %d major page faults\n",
+                 NR, prev - t0, min, at, swap, gap, gat, (c > c0 ? 100 * (s - s0) / (c - c0) : 0), f - f0 }' "$3"
   fi
   ;;
 sample)
@@ -38,14 +43,19 @@ sample)
     avail=$(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo)
     cpu=$(awk '/^cpu / { t = 0; for (i = 2; i <= NF; i++) t += $i; print $9, t }' /proc/stat)
     majflt=$(awk '/^pgmajfault / { print $2 }' /proc/vmstat)
+    swap=$(awk '/^SwapTotal:/ { t = $2 } /^SwapFree:/ { f = $2 } END { print int((t - f) / 1024) }' /proc/meminfo)
     psi=$(awk '{ printf "%s_%s ", $1, $2 }' /proc/pressure/memory 2>/dev/null)
-    echo "$(date +%s) $avail $cpu $majflt $psi" >>"$2"
+    line="$(date +%s) $avail $cpu $majflt $swap $psi"
+    echo "$line" >>"$2"
+    if [[ ${3:-} == echo ]]; then
+      echo "sample $(date -u +%H:%M:%S): available ${avail} MiB, swap used ${swap} MiB, memory pressure ${psi:-n/a}; most memory: $(ps -eo rss=,comm= --sort=-rss | head -3 | awk '{ printf "%s %d MiB; ", $2, $1 / 1024 }')"
+    fi
     sleep 30 &
     wait $!
   done
   ;;
 *)
-  echo "usage: build/sim-vm.sh report <label> [samples] | sample <samples>" >&2
+  echo "usage: build/sim-vm.sh report <label> [samples] | sample <samples> [echo]" >&2
   exit 2
   ;;
 esac
