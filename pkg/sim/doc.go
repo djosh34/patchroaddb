@@ -57,10 +57,13 @@
 // the translated test binary. The native test binary drives it:
 // TestCampaign runs a range of seeds, TestReplay one seed twice,
 // TestPlanted the planted bugs and TestFirstStart a power loss right
-// after the first start (TestFirstStartPowerLoss). A seed fails if it
+// after the first start (TestFirstStartPowerLoss). A seed's run ends if it
 // uses 300 s of CPU time, as one that spins in a busy loop does, or 20
 // minutes of real time; a seed on a VM that stalls uses little CPU and gets
-// the time it needs (seedLimits, TestSeedLimits). build/sim-build.sh
+// the time it needs (seedLimits). A run that a limit ended runs once more,
+// at once, as a VM whose hypervisor takes its CPU can make any seed pass
+// a limit, and the seed fails only if that run fails too (countedRun,
+// TestSeedLimits). build/sim-build.sh
 // builds both, and .github/workflows/sim.yml runs campaigns. TestChaos
 // runs the same scenario on real processes, every night
 // (build/ci/chaos.sh).
