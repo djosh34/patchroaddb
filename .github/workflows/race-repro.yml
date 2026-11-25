@@ -1,0 +1,61 @@
+# TEMPORARY (plan 2, task 1): reruns the tests that failed in nightly.yml
+# under the race detector on the nightly's runner type. Removed before merge.
+name: race-repro
+
+on:
+  push:
+    branches: [work/plan2-race-tests]
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: cli-checkstore, pkg: ./pkg/cli, run: '^TestDebugCheckStore$', count: 4}
+          - {name: lease, pkg: ./pkg/sql/catalog/lease, run: '^(TestLeaseManagerReacquire|TestLeaseRenewedPeriodically)$', count: 4}
+          - {name: sql-livebytes, pkg: ./pkg/sql, run: '^TestTenantGlobalAggregatedLivebytes$', count: 4}
+          - {name: jobs-wait, pkg: ./pkg/jobs, run: '^TestWaitWithRetryableError$', count: 10}
+          - {name: appapi, pkg: ./pkg/server/application_api, run: '^(TestStatusAPIContentionEvents|TestAdminAPIDatabaseDetails|TestListClosedSessions)$', count: 3}
+          - {name: reports, pkg: ./pkg/kv/kvserver/reports, run: '^TestCriticalLocalitiesReportIntegration$', count: 3}
+          - {name: testcluster, pkg: ./pkg/testutils/testcluster, run: '^TestClusterSqlDisabled$', count: 2}
+          - {name: sqlstats, pkg: ./pkg/sql/sqlstats/persistedsqlstats, run: '^TestSQLStatsDataDriven$', count: 4}
+          - {name: zstd, pkg: ./pkg/sql/sem/builtins, run: '^TestDecompress', count: 2}
+          - {name: shard0, shard: 0}
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-go
+      - name: Memory monitor
+        run: |
+          (while true; do
+             echo "$(date +%T) $(free -m | awk '/Mem:/{print "used="$3"MB avail="$7"MB"}') load=$(cut -d' ' -f1 /proc/loadavg) top=$(ps -eo rss,comm --sort=-rss | sed -n 2,4p | awk '{printf "%s:%dMB ", $2, $1/1024}')"
+             sleep 60
+           done) > "$RUNNER_TEMP/mem.log" 2>&1 &
+      - name: Test
+        run: |
+          if [[ -n "${{ matrix.shard }}" ]]; then
+            build/ci/test.sh test ${{ matrix.shard }} 11 -race -timeout 300m -v > "$RUNNER_TEMP/test.log" 2>&1 || status=$?
+          else
+            go test -tags crdb_test -race -timeout 300m -v -count ${{ matrix.count }} \
+              ${{ matrix.pkg }} -run '${{ matrix.run }}' > "$RUNNER_TEMP/test.log" 2>&1 || status=$?
+          fi
+          grep -E -- '^(--- |    --- |=== RUN|ok |FAIL|panic:|WARNING: DATA RACE)' "$RUNNER_TEMP/test.log" | grep -v '=== RUN' | tail -400
+          grep -E -B2 -A30 -- '--- FAIL' "$RUNNER_TEMP/test.log" | head -400 || true
+          exit ${status:-0}
+      - name: Memory
+        if: always()
+        run: sort -t= -k2 -n "$RUNNER_TEMP/mem.log" | tail -3; tail -5 "$RUNNER_TEMP/mem.log"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repro-${{ matrix.name }}
+          path: |
+            ${{ runner.temp }}/test.log
+            ${{ runner.temp }}/mem.log
