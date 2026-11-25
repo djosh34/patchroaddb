@@ -406,6 +406,15 @@ func getPGXConnAndCleanupFunc(
 	t.Helper()
 	pgURL, cleanup := sqlutils.PGUrl(t, servingSQLAddr, t.Name(), url.User(username.RootUser))
 	pgURL.Path = "test"
+	// Disable results buffering - we want to ensure that the server doesn't do
+	// any automatic retries, and also we use the client to know when to unblock
+	// the read. This is a connection option because a session reads the
+	// buffer size once, at connection time: a cluster setting set just before
+	// might not have reached the node yet, and then the rows would stay in the
+	// buffer while the read waits for the client to see them.
+	q := pgURL.Query()
+	q.Set("results_buffer_size", "0")
+	pgURL.RawQuery = q.Encode()
 	pgxConfig, err := pgx.ParseConfig(pgURL.String())
 	require.NoError(t, err)
 	defaultConn, err := pgx.ConnectConfig(ctx, pgxConfig)
@@ -415,14 +424,9 @@ func getPGXConnAndCleanupFunc(
 	return defaultConn, cleanup
 }
 
-func populateRangeCacheAndDisableBuffering(t *testing.T, db *gosql.DB, tableName string) {
+func populateRangeCache(t *testing.T, db *gosql.DB, tableName string) {
 	t.Helper()
 	_, err := db.Exec("SELECT count(1) FROM " + tableName)
-	require.NoError(t, err)
-	// Disable results buffering - we want to ensure that the server doesn't do
-	// any automatic retries, and also we use the client to know when to unblock
-	// the read.
-	_, err = db.Exec("SET CLUSTER SETTING sql.defaults.results_buffer.size = '0'")
 	require.NoError(t, err)
 }
 
@@ -525,7 +529,7 @@ func TestDrainingProcessorSwallowsUncertaintyError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	populateRangeCacheAndDisableBuffering(t, origDB0, "t")
+	populateRangeCache(t, origDB0, "t")
 	defaultConn, cleanup := getPGXConnAndCleanupFunc(ctx, t, tc.Server(0).AdvSQLAddr())
 	defer cleanup()
 
@@ -703,7 +707,7 @@ func TestUncertaintyErrorIsReturned(t *testing.T) {
 		tc.Server(2).GetFirstStoreID(),
 	))
 	require.NoError(t, err)
-	populateRangeCacheAndDisableBuffering(t, dbConn, "t")
+	populateRangeCache(t, dbConn, "t")
 	defaultConn, cleanup := getPGXConnAndCleanupFunc(ctx, t, tc.Server(0).AdvSQLAddr())
 	defer cleanup()
 
