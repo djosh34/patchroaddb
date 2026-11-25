@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -104,9 +105,9 @@ func (p *procs) start(n *proc) error {
 		n.done = done
 	}()
 	go func() {
+		defer close(done)
 		err := cmd.Wait()
 		_ = f.Close()
-		close(done)
 		// A process that ends while not killed failed.
 		if p.markKilled(n) {
 			p.fail("%s stopped on its own: %v", n.ns, err)
@@ -127,27 +128,58 @@ func (p *procs) s3Endpoint() string { return p.endpoint }
 
 func (p *procs) crash(i int) bool { return p.kill(p.nodes[i]) }
 
-// kill kills n's processes and waits until they have ended, so that a
-// restart finds the store unlocked. The processes are found by their store
-// path: a pid file would still name the previous process while a restarted
-// one starts up. The "[-]" keeps the pattern from matching the sudo that
-// runs pkill.
+// kill kills n's processes and waits until none is left and the goroutine
+// waiting for them is done, so that a restart finds the store unlocked and
+// the old process cannot change n's state. It reports false if they do not
+// end. The processes are found by their store path: a pid file would still
+// name the previous process while a restarted one starts up. pkill runs
+// again until pgrep finds nothing, which also catches a process that sudo
+// starts during a kill. The "[-]" keeps the pattern from matching the sudo
+// that runs pkill.
 func (p *procs) kill(n *proc) bool {
 	if !p.markKilled(n) {
 		return false
 	}
-	if err := p.root("pkill", "-KILL", "-f", "--", "[-]-store=path="+filepath.Join(p.nodeDir(n), "data")+","); err != nil {
-		p.fail("killing %s: %v", n.ns, err)
+	pattern := "[-]-store=path=" + regexp.QuoteMeta(filepath.Join(p.nodeDir(n), "data")) + ","
+	for i := 0; ; i++ {
+		// pkill and pgrep exit with status 1 when no process matches.
+		if err := p.root("pkill", "-KILL", "-f", "--", pattern); err != nil && !noMatch(err) {
+			p.fail("killing %s: %v", n.ns, err)
+			return false
+		}
+		err := exec.Command("pgrep", "-f", "--", pattern).Run()
+		if noMatch(err) {
+			break
+		}
+		if err != nil {
+			p.fail("looking for %s: %v", n.ns, err)
+			return false
+		}
+		if i == 600 {
+			p.fail("%s did not end within a minute of the kill", n.ns)
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 	p.mu.Lock()
 	done := n.done
 	p.mu.Unlock()
-	select {
-	case <-done:
-	case <-time.After(time.Minute):
-		p.fail("%s did not end within a minute of the kill", n.ns)
+	if done != nil {
+		select {
+		case <-done:
+		case <-time.After(time.Minute):
+			p.fail("%s: its sudo did not end within a minute of the kill", n.ns)
+			return false
+		}
 	}
 	return true
+}
+
+// noMatch reports whether err is the exit status 1 of pkill or pgrep, which
+// means that no process matched.
+func noMatch(err error) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && exitErr.ExitCode() == 1
 }
 
 // markKilled marks a running process killed and reports whether it ran.
