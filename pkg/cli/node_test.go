@@ -183,9 +183,8 @@ func checkNodeStatus(t *testing.T, c TestCLI, output string, start time.Time) {
 	}
 
 	// Verify that updated_at and started_at are reasonably recent.
-	// CircleCI can be very slow. This was flaky at 5s.
-	checkTimeElapsed(t, fields[4], 15*time.Second, start)
-	checkTimeElapsed(t, fields[5], 15*time.Second, start)
+	checkTimeRecent(t, fields[4], start)
+	checkTimeRecent(t, fields[5], start)
 
 	testcases := []testCase{}
 
@@ -265,9 +264,10 @@ func checkSeparatorLine(t *testing.T, s *bufio.Scanner) {
 	}
 }
 
-// checkRecentTime produces a test error if the time is not within the specified number
-// of seconds of the given start time.
-func checkTimeElapsed(t *testing.T, timeStr string, elapsed time.Duration, start time.Time) {
+// checkTimeRecent produces a test error if the time is not between the given
+// start time and now. The node status is rewritten every few seconds, so on a
+// slow run a later command sees a later time than an earlier one.
+func checkTimeRecent(t *testing.T, timeStr string, start time.Time) {
 	// Truncate start time, because the CLI currently outputs times with a second-level
 	// granularity.
 	start = start.Truncate(time.Second)
@@ -276,7 +276,7 @@ func checkTimeElapsed(t *testing.T, timeStr string, elapsed time.Duration, start
 		t.Errorf("couldn't parse time '%s': %s", timeStr, err)
 		return
 	}
-	end := start.Add(elapsed)
+	end := timeutil.Now()
 	if tm.Before(start) || tm.After(end) {
 		t.Errorf("time (%s) not within range [%s,%s]", tm, start, end)
 	}

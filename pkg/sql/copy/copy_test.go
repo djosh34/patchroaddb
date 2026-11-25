@@ -592,10 +592,22 @@ func TestLargeDynamicRows(t *testing.T) {
 	err := conn.Exec(ctx, `SET COPY_FAST_PATH_ENABLED = 'true'`)
 	require.NoError(t, err)
 
-	// 4.0 MiB is minimum, copy sets max row size to this value / 3
-	for _, l := range []serverutils.ApplicationLayerInterface{s, s.SystemLayer()} {
-		kvserverbase.MaxCommandSize.Override(ctx, &l.ClusterSettings().SV, 4<<20)
+	// setMaxCommandSize sets kv.raft.command.max_size on the system layer and
+	// waits until the SQL layer uses it. A virtual cluster takes this setting
+	// from the system layer, and that value would replace a local override.
+	sysDB := sqlutils.MakeSQLRunner(s.SystemLayer().SQLConn(t))
+	setMaxCommandSize := func(stmt string, want int64) {
+		sysDB.Exec(t, stmt)
+		testutils.SucceedsSoon(t, func() error {
+			if got := kvserverbase.MaxCommandSize.Get(&s.ApplicationLayer().ClusterSettings().SV); got != want {
+				return errors.Newf("max command size is %d, want %d", got, want)
+			}
+			return nil
+		})
 	}
+
+	// 4.0 MiB is minimum, copy sets max row size to this value / 3
+	setMaxCommandSize(`SET CLUSTER SETTING kv.raft.command.max_size = '4MiB'`, 4<<20)
 
 	err = conn.Exec(ctx, "CREATE TABLE t (s STRING)")
 	require.NoError(t, err)
@@ -614,9 +626,7 @@ func TestLargeDynamicRows(t *testing.T) {
 	batchNumber = 0
 
 	// Reset and make sure we use 1 batch.
-	for _, l := range []serverutils.ApplicationLayerInterface{s, s.SystemLayer()} {
-		kvserverbase.MaxCommandSize.Override(ctx, &l.ClusterSettings().SV, kvserverbase.MaxCommandSizeDefault)
-	}
+	setMaxCommandSize(`RESET CLUSTER SETTING kv.raft.command.max_size`, kvserverbase.MaxCommandSizeDefault)
 
 	// This won't work if the batch size gets set to less than 5. When the batch
 	// size is 4, the test hook will count an extra empty batch.
