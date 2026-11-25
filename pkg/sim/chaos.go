@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -53,6 +54,8 @@ type proc struct {
 	addr   string
 	args   []string
 	killed bool
+	// done is closed when the process started last has ended.
+	done chan struct{}
 }
 
 // The namespaces chaos.sh makes: n1 to n4 at 10.9.0.1 to 10.9.0.4 on eth0,
@@ -83,7 +86,7 @@ func (p *procs) start(n *proc) error {
 		"env", "AWS_ACCESS_KEY_ID=" + s3Key, "AWS_SECRET_ACCESS_KEY=" + s3Secret, "AWS_REGION=" + s3Region,
 		p.bin}, n.args...)
 	args = append(args, "--store=path="+filepath.Join(dir, "data")+",ballast-size=0",
-		"--config="+cfg, "--log-dir="+filepath.Join(dir, "logs"), "--pid-file="+filepath.Join(dir, "pid"))
+		"--config="+cfg, "--log-dir="+filepath.Join(dir, "logs"))
 	cmd := exec.Command("sudo", args...)
 	f, err := os.OpenFile(filepath.Join(dir, "stderr.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -94,12 +97,15 @@ func (p *procs) start(n *proc) error {
 		_ = f.Close()
 		return err
 	}
+	done := make(chan struct{})
 	func() {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		n.killed = false
+		n.done = done
 	}()
 	go func() {
+		defer close(done)
 		err := cmd.Wait()
 		_ = f.Close()
 		// A process that ends while not killed failed.
@@ -122,18 +128,45 @@ func (p *procs) s3Endpoint() string { return p.endpoint }
 
 func (p *procs) crash(i int) bool { return p.kill(p.nodes[i]) }
 
+// kill kills n's database process and waits until the sudo that started it
+// has reaped it, so that a restart finds the store unlocked and the old
+// process cannot change n's state. It reports false if that takes more than
+// a minute. Only the database process is killed, found by its command line,
+// which starts with the binary and names the node's store: a pid file would
+// still name the previous process while a restarted one starts up, and the
+// launchers stay alive so that their exit shows the database has ended.
+// pkill runs again until then, which also catches a database that starts
+// during the kill.
 func (p *procs) kill(n *proc) bool {
 	if !p.markKilled(n) {
 		return false
 	}
-	pid, err := os.ReadFile(filepath.Join(p.nodeDir(n), "pid"))
-	if err == nil {
-		err = p.root("kill", "-KILL", strings.TrimSpace(string(pid)))
+	p.mu.Lock()
+	done := n.done
+	p.mu.Unlock()
+	if done == nil {
+		// Never started.
+		return true
 	}
-	if err != nil {
-		p.fail("killing %s: %v", n.ns, err)
+	pattern := "^" + regexp.QuoteMeta(p.bin) + " .*--store=path=" +
+		regexp.QuoteMeta(filepath.Join(p.nodeDir(n), "data")) + ","
+	deadline := time.After(time.Minute)
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	var lastErr error
+	for {
+		// pkill exits with status 1 when no process matches. The error, with
+		// sudo's output, is kept for the timeout message.
+		lastErr = p.root("pkill", "-KILL", "-f", "--", pattern)
+		select {
+		case <-done:
+			return true
+		case <-deadline:
+			p.fail("%s did not end within a minute of the kill; last pkill error: %v", n.ns, lastErr)
+			return false
+		case <-tick.C:
+		}
 	}
-	return true
 }
 
 // markKilled marks a running process killed and reports whether it ran.
