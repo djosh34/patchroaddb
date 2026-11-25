@@ -408,10 +408,8 @@ func getPGXConnAndCleanupFunc(
 	pgURL.Path = "test"
 	// Disable results buffering - we want to ensure that the server doesn't do
 	// any automatic retries, and also we use the client to know when to unblock
-	// the read. This is a connection option because a session reads the
-	// buffer size once, at connection time: a cluster setting set just before
-	// might not have reached the node yet, and then the rows would stay in the
-	// buffer while the read waits for the client to see them.
+	// the read. It is a connection option, so the test does not depend on
+	// cluster-wide state.
 	q := pgURL.Query()
 	q.Set("results_buffer_size", "0")
 	pgURL.RawQuery = q.Encode()
