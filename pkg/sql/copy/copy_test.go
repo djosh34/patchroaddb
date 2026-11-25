@@ -582,7 +582,8 @@ func TestLargeDynamicRows(t *testing.T) {
 	s := serverutils.StartServerOnly(t, params)
 	defer s.Stopper().Stop(ctx)
 
-	url, cleanup := sqlutils.PGUrl(t, s.AdvSQLAddr(), "copytest", url.User(username.RootUser))
+	// COPY runs on the SQL layer whose max command size is checked below.
+	url, cleanup := s.ApplicationLayer().PGUrl(t, serverutils.CertsDirPrefix("copytest"), serverutils.User(username.RootUser))
 	defer cleanup()
 	var sqlConnCtx clisqlclient.Context
 	conn := sqlConnCtx.MakeSQLConn(io.Discard, io.Discard, url.String())
@@ -592,9 +593,9 @@ func TestLargeDynamicRows(t *testing.T) {
 	err := conn.Exec(ctx, `SET COPY_FAST_PATH_ENABLED = 'true'`)
 	require.NoError(t, err)
 
-	// setMaxCommandSize sets kv.raft.command.max_size on the system layer and
-	// waits until the SQL layer uses it. A virtual cluster takes this setting
-	// from the system layer, and that value would replace a local override.
+	// setMaxCommandSize sets kv.raft.command.max_size on the system layer,
+	// where a virtual cluster takes it from, and waits until the SQL layer
+	// that runs the COPY uses it.
 	sysDB := sqlutils.MakeSQLRunner(s.SystemLayer().SQLConn(t))
 	setMaxCommandSize := func(stmt string, want int64) {
 		sysDB.Exec(t, stmt)
