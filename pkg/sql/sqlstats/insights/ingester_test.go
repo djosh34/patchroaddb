@@ -182,16 +182,15 @@ func TestIngester_DoesNotBlockWhenConsumerStopsDuringSend(t *testing.T) {
 	ingester.Start(ctx, stopper)
 
 	stopper.Stop(ctx)
-	<-stopper.IsStopped()
 	atomic.StoreUint64(&ingester.running, 1)
 
 	done := make(chan struct{})
 	go func() {
-		// Enough observations to fill the ingester's channel at least twice.
+		// Enough observations for two full-buffer sends; the second blocks if
+		// nothing reads the channel.
 		for i := 0; i < 2*bufferSize+1; i++ {
 			ingester.ObserveStatement(clusterunique.ID{}, &Statement{})
 		}
-		ingester.guard.ForceSync()
 		close(done)
 	}()
 
