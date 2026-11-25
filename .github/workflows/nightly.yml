@@ -24,7 +24,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-go
-      - run: build/ci/test.sh test ${{ matrix.shard }} 11 -race -timeout 300m
+      # Two test binaries at a time: with go test's default of one per CPU,
+      # the race detector's slowdown leaves the test clusters of four
+      # binaries too little CPU to keep their liveness and leases.
+      - run: build/ci/test.sh test ${{ matrix.shard }} 11 -race -timeout 300m -p 2
 
   logic-race:
     runs-on: ubuntu-24.04

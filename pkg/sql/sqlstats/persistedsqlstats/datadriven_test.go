@@ -101,6 +101,13 @@ func TestSQLStatsDataDriven(t *testing.T) {
 	if err != nil {
 		t.Errorf("failed to enable plan collection due to %s", err.Error())
 	}
+	// The expected plans assume the system tables have no statistics. About a
+	// minute after start, automatic collection would add them, which a slow
+	// run reaches before its last test file.
+	_, err = sqlConn.Exec(`SET CLUSTER SETTING sql.stats.automatic_collection.enabled = false;`)
+	if err != nil {
+		t.Errorf("failed to disable automatic statistics collection due to %s", err.Error())
+	}
 
 	execDataDrivenTestCmd := func(t *testing.T, d *datadriven.TestData) string {
 		switch d.Cmd {

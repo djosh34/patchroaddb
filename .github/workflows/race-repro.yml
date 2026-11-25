@@ -17,16 +17,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {name: cli-checkstore, pkg: ./pkg/cli, run: '^TestDebugCheckStore$', count: 4}
-          - {name: lease, pkg: ./pkg/sql/catalog/lease, run: '^(TestLeaseManagerReacquire|TestLeaseRenewedPeriodically)$', count: 4}
           - {name: sql-livebytes, pkg: ./pkg/sql, run: '^TestTenantGlobalAggregatedLivebytes$', count: 4}
-          - {name: jobs-wait, pkg: ./pkg/jobs, run: '^TestWaitWithRetryableError$', count: 10}
-          - {name: appapi, pkg: ./pkg/server/application_api, run: '^(TestStatusAPIContentionEvents|TestAdminAPIDatabaseDetails|TestListClosedSessions)$', count: 3}
-          - {name: reports, pkg: ./pkg/kv/kvserver/reports, run: '^TestCriticalLocalitiesReportIntegration$', count: 3}
-          - {name: testcluster, pkg: ./pkg/testutils/testcluster, run: '^TestClusterSqlDisabled$', count: 2}
+          - {name: appapi-sessions, pkg: ./pkg/server/application_api, run: '^TestListClosedSessions$', count: 4}
           - {name: sqlstats, pkg: ./pkg/sql/sqlstats/persistedsqlstats, run: '^TestSQLStatsDataDriven$', count: 4}
-          - {name: zstd, pkg: ./pkg/sql/sem/builtins, run: '^TestDecompress', count: 2}
-          - {name: shard0, shard: 0}
+          - {name: jobs-wait, pkg: ./pkg/jobs, run: '^TestWaitWithRetryableError$', count: 10}
     env:
       CGO_ENABLED: "1"
     steps:
