@@ -12,6 +12,7 @@ package insights
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -164,6 +165,39 @@ func TestIngester_DoesNotBlockWhenReceivingManyObservationsAfterShutdown(t *test
 		// Success!
 	case <-time.After(time.Second):
 		t.Fatal("Did not finish writing observations into the ingester within the expected time; the operation is probably blocked.")
+	}
+}
+
+func TestIngester_DoesNotBlockWhenConsumerStopsDuringSend(t *testing.T) {
+	// A full buffer is sent to the consumer only if the consumer runs, but the
+	// consumer can stop between that check and the send. Then nothing reads
+	// the channel, and the send used to block, which hung server shutdown.
+	// Here the check sees a running consumer that has already stopped.
+	ctx := context.Background()
+	stopper := stop.NewStopper()
+
+	st := cluster.MakeTestingClusterSettings()
+	registry := newRegistry(st, &fakeDetector{stubEnabled: true}, newStore(st))
+	ingester := newConcurrentBufferIngester(registry)
+	ingester.Start(ctx, stopper)
+
+	stopper.Stop(ctx)
+	atomic.StoreUint64(&ingester.running, 1)
+
+	done := make(chan struct{})
+	go func() {
+		// Enough observations for two full-buffer sends; the second blocks if
+		// nothing reads the channel.
+		for i := 0; i < 2*bufferSize+1; i++ {
+			ingester.ObserveStatement(clusterunique.ID{}, &Statement{})
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("writing observations into the ingester did not finish; the send is probably blocked")
 	}
 }
 

@@ -39,7 +39,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -739,6 +738,10 @@ func TestWaitWithRetryableError(t *testing.T) {
 	var targetJobID atomic.Int64
 	var numberOfTimesDetected atomic.Int64
 	const targetNumberOfRetries = 5
+	// The job finishing ends the wait, so it is held until the retries
+	// happened. Otherwise a job adopted early, as on a slow machine, ends the
+	// wait after fewer retries.
+	retriesDone := make(chan struct{})
 	args := base.TestServerArgs{
 		Settings: cs,
 		// Leasing settings used above conflict with some updates
@@ -758,6 +761,7 @@ func TestWaitWithRetryableError(t *testing.T) {
 						// enough times disable the after execution.
 						if numberOfTimesDetected.Add(1) > targetNumberOfRetries-1 {
 							targetJobID.Store(0)
+							close(retriesDone)
 						}
 					}
 				},
@@ -766,7 +770,14 @@ func TestWaitWithRetryableError(t *testing.T) {
 	}
 
 	jobs.RegisterConstructor(jobspb.TypeImport, func(_ *jobs.Job, cs *cluster.Settings) jobs.Resumer {
-		return jobstest.FakeResumer{}
+		return jobstest.FakeResumer{OnResume: func(ctx context.Context) error {
+			select {
+			case <-retriesDone:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}}
 	}, jobs.UsesTenantCostControl)
 	s := serverutils.StartServerOnly(t, args)
 	defer s.Stopper().Stop(ctx)
@@ -791,12 +802,5 @@ func TestWaitWithRetryableError(t *testing.T) {
 		registry.WaitForJobs(
 			ctx, []jobspb.JobID{id},
 		))
-	if !skip.Stress() {
-		require.Equalf(t, int64(targetNumberOfRetries), numberOfTimesDetected.Load(), "jobs query did not retry")
-	} else {
-		// For stress be lenient since we are relying on timing for leasing
-		// expiration, which can be imprecise. So, lets aim for at least one
-		// retry.
-		require.GreaterOrEqualf(t, numberOfTimesDetected.Load(), int64(2), "jobs query did not retry")
-	}
+	require.Equalf(t, int64(targetNumberOfRetries), numberOfTimesDetected.Load(), "jobs query did not retry")
 }

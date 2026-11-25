@@ -24,6 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/persistedsqlstats"
+	"github.com/cockroachdb/cockroach/pkg/sql/stats"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/datapathutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -80,6 +81,11 @@ func TestSQLStatsDataDriven(t *testing.T) {
 	knobs.OnStmtStatsFlushFinished = injector.invokePostStmtStatsFlushCallback
 	knobs.OnTxnStatsFlushFinished = injector.invokePostTxnStatsFlushCallback
 	params.Knobs.SQLStatsKnobs = knobs
+	// The expected plans assume the system tables have no statistics. The
+	// stats refresher collects them for every table about a minute after start,
+	// which a slow run reaches before its last test file. This knob stops that
+	// collection; the setting below stops collection after writes.
+	params.Knobs.TableStatsKnobs = &stats.TableStatsTestingKnobs{DisableInitialTableCollection: true}
 
 	cluster := serverutils.StartCluster(t, 3 /* numNodes */, base.TestClusterArgs{
 		ServerArgs: params,
@@ -100,6 +106,10 @@ func TestSQLStatsDataDriven(t *testing.T) {
 	_, err := sqlConn.Exec(`SET CLUSTER SETTING sql.metrics.statement_details.plan_collection.enabled = true;`)
 	if err != nil {
 		t.Errorf("failed to enable plan collection due to %s", err.Error())
+	}
+	_, err = sqlConn.Exec(`SET CLUSTER SETTING sql.stats.automatic_collection.enabled = false;`)
+	if err != nil {
+		t.Errorf("failed to disable automatic statistics collection due to %s", err.Error())
 	}
 
 	execDataDrivenTestCmd := func(t *testing.T, d *datadriven.TestData) string {

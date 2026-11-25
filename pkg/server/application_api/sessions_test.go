@@ -321,9 +321,6 @@ func TestListClosedSessions(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	// The active sessions might close before the stress race can finish.
-	skip.UnderStressRace(t, "active sessions")
-
 	ctx := context.Background()
 	testCluster := serverutils.StartCluster(t, 3, base.TestClusterArgs{})
 	defer testCluster.Stopper().Stop(ctx)
@@ -372,16 +369,28 @@ CREATE USER %s with password 'hunter2';
 
 	var wg sync.WaitGroup
 
-	// Open 5 sessions for the user and leave them open by running pg_sleep(30).
+	// Open 5 sessions for the user and keep them active with pg_sleep until the
+	// check below is done. A sleep of fixed length could end before the check
+	// on a slow run.
+	sleepCtx, stopSleeping := context.WithCancel(ctx)
+	// Cancel the pg_sleep() commands and wait for their goroutines, also when
+	// the check fails, so they are done before the cluster stops.
+	defer func() {
+		stopSleeping()
+		wg.Wait()
+	}()
 	for _, user := range users {
 		for i := 0; i < 5; i++ {
 			wg.Add(1)
 			go func(user string) {
+				defer wg.Done()
 				// Open a session for the target user.
 				targetDB := getUserConn(t, user, server)
 				defer targetDB.Close()
-				defer wg.Done()
-				sqlutils.MakeSQLRunner(targetDB).Exec(t, `SELECT pg_sleep(30)`)
+				_, err := targetDB.ExecContext(sleepCtx, `SELECT pg_sleep(1000)`)
+				if sleepCtx.Err() == nil {
+					t.Errorf("pg_sleep ended before the check: %v", err)
+				}
 			}(user)
 		}
 	}
@@ -437,8 +446,4 @@ CREATE USER %s with password 'hunter2';
 		}
 		return nil
 	})
-
-	// Wait for the goroutines from the pg_sleep() command to finish, so we can
-	// safely close their connections.
-	wg.Wait()
 }

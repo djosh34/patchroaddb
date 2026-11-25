@@ -11,6 +11,7 @@
 package builtins
 
 import (
+	"io"
 	"runtime"
 	"testing"
 
@@ -40,16 +41,38 @@ func TestDecompressIsBounded(t *testing.T) {
 }
 
 // TestDecompressZstdAllocationIsBounded checks that decompressing a large zstd
-// output does not allocate it before the limit applies.
+// output does not allocate it before the limit applies: decompress may
+// allocate what io.ReadAll needs for the limit, plus at most 64 MiB. The
+// io.ReadAll cost is measured, because the race detector doubles it.
 func TestDecompressZstdAllocationIsBounded(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	compressed, err := compress(make([]byte, 512<<20), "zstd")
 	require.NoError(t, err)
 
+	readAll := totalAlloc(func() {
+		_, err := io.ReadAll(io.LimitReader(zeros{}, maxDecompressedSize+1))
+		require.NoError(t, err)
+	})
+	decompressed := totalAlloc(func() {
+		_, err := decompress(compressed, "zstd")
+		require.ErrorContains(t, err, "exceeds the limit")
+	})
+	require.Less(t, decompressed, readAll+64<<20)
+}
+
+// totalAlloc returns the bytes allocated while f runs.
+func totalAlloc(f func()) uint64 {
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	_, err = decompress(compressed, "zstd")
+	f()
 	runtime.ReadMemStats(&after)
-	require.ErrorContains(t, err, "exceeds the limit")
-	require.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(400<<20))
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+// zeros reads an endless run of zero bytes.
+type zeros struct{}
+
+func (zeros) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
 }
