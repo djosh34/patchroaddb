@@ -739,6 +739,10 @@ func TestWaitWithRetryableError(t *testing.T) {
 	var targetJobID atomic.Int64
 	var numberOfTimesDetected atomic.Int64
 	const targetNumberOfRetries = 5
+	// The job finishing ends the wait, so it is held until the retries
+	// happened. Otherwise a job adopted early, as on a slow machine, ends the
+	// wait after fewer retries.
+	retriesDone := make(chan struct{})
 	args := base.TestServerArgs{
 		Settings: cs,
 		// Leasing settings used above conflict with some updates
@@ -758,6 +762,7 @@ func TestWaitWithRetryableError(t *testing.T) {
 						// enough times disable the after execution.
 						if numberOfTimesDetected.Add(1) > targetNumberOfRetries-1 {
 							targetJobID.Store(0)
+							close(retriesDone)
 						}
 					}
 				},
@@ -766,7 +771,14 @@ func TestWaitWithRetryableError(t *testing.T) {
 	}
 
 	jobs.RegisterConstructor(jobspb.TypeImport, func(_ *jobs.Job, cs *cluster.Settings) jobs.Resumer {
-		return jobstest.FakeResumer{}
+		return jobstest.FakeResumer{OnResume: func(ctx context.Context) error {
+			select {
+			case <-retriesDone:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}}
 	}, jobs.UsesTenantCostControl)
 	s := serverutils.StartServerOnly(t, args)
 	defer s.Stopper().Stop(ctx)
