@@ -440,10 +440,16 @@ func TestImportHonorsResumePosition(t *testing.T) {
 			t.Run(fmt.Sprintf("resume-%v-%v", spec.Format.Format, resumePos), func(t *testing.T) {
 				rp := resumePos
 				progCh := make(chan execinfrapb.RemoteProducerMetadata_BulkProcessorProgress)
-				defer close(progCh)
+				// The consumer uses t, so the subtest waits for it before it ends.
+				consumerDone := make(chan struct{})
+				defer func() {
+					close(progCh)
+					<-consumerDone
+				}()
 
 				// Setup progress consumer.
 				go func() {
+					defer close(consumerDone)
 					// Consume progress reports. Since we expect every batch to be flushed
 					// (BulkAdderFlushesEveryBatch), then the progress resport must be emitted every
 					// batchSize rows (possibly out of order), starting from our initial resumePos
