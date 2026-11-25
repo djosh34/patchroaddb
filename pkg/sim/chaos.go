@@ -53,6 +53,8 @@ type proc struct {
 	addr   string
 	args   []string
 	killed bool
+	// done is closed when the process started last has ended.
+	done chan struct{}
 }
 
 // The namespaces chaos.sh makes: n1 to n4 at 10.9.0.1 to 10.9.0.4 on eth0,
@@ -83,7 +85,7 @@ func (p *procs) start(n *proc) error {
 		"env", "AWS_ACCESS_KEY_ID=" + s3Key, "AWS_SECRET_ACCESS_KEY=" + s3Secret, "AWS_REGION=" + s3Region,
 		p.bin}, n.args...)
 	args = append(args, "--store=path="+filepath.Join(dir, "data")+",ballast-size=0",
-		"--config="+cfg, "--log-dir="+filepath.Join(dir, "logs"), "--pid-file="+filepath.Join(dir, "pid"))
+		"--config="+cfg, "--log-dir="+filepath.Join(dir, "logs"))
 	cmd := exec.Command("sudo", args...)
 	f, err := os.OpenFile(filepath.Join(dir, "stderr.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -94,14 +96,17 @@ func (p *procs) start(n *proc) error {
 		_ = f.Close()
 		return err
 	}
+	done := make(chan struct{})
 	func() {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		n.killed = false
+		n.done = done
 	}()
 	go func() {
 		err := cmd.Wait()
 		_ = f.Close()
+		close(done)
 		// A process that ends while not killed failed.
 		if p.markKilled(n) {
 			p.fail("%s stopped on its own: %v", n.ns, err)
@@ -122,16 +127,25 @@ func (p *procs) s3Endpoint() string { return p.endpoint }
 
 func (p *procs) crash(i int) bool { return p.kill(p.nodes[i]) }
 
+// kill kills n's processes and waits until they have ended, so that a
+// restart finds the store unlocked. The processes are found by their store
+// path: a pid file would still name the previous process while a restarted
+// one starts up. The "[-]" keeps the pattern from matching the sudo that
+// runs pkill.
 func (p *procs) kill(n *proc) bool {
 	if !p.markKilled(n) {
 		return false
 	}
-	pid, err := os.ReadFile(filepath.Join(p.nodeDir(n), "pid"))
-	if err == nil {
-		err = p.root("kill", "-KILL", strings.TrimSpace(string(pid)))
-	}
-	if err != nil {
+	if err := p.root("pkill", "-KILL", "-f", "--", "[-]-store=path="+filepath.Join(p.nodeDir(n), "data")+","); err != nil {
 		p.fail("killing %s: %v", n.ns, err)
+	}
+	p.mu.Lock()
+	done := n.done
+	p.mu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(time.Minute):
+		p.fail("%s did not end within a minute of the kill", n.ns)
 	}
 	return true
 }
