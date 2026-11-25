@@ -373,15 +373,20 @@ CREATE USER %s with password 'hunter2';
 	// check below is done. A sleep of fixed length could end before the check
 	// on a slow run.
 	sleepCtx, stopSleeping := context.WithCancel(ctx)
-	defer stopSleeping()
+	// Cancel the pg_sleep() commands and wait for their goroutines, also when
+	// the check fails, so they are done before the cluster stops.
+	defer func() {
+		stopSleeping()
+		wg.Wait()
+	}()
 	for _, user := range users {
 		for i := 0; i < 5; i++ {
 			wg.Add(1)
 			go func(user string) {
+				defer wg.Done()
 				// Open a session for the target user.
 				targetDB := getUserConn(t, user, server)
 				defer targetDB.Close()
-				defer wg.Done()
 				_, err := targetDB.ExecContext(sleepCtx, `SELECT pg_sleep(1000)`)
 				if sleepCtx.Err() == nil {
 					t.Errorf("pg_sleep ended before the check: %v", err)
@@ -441,9 +446,4 @@ CREATE USER %s with password 'hunter2';
 		}
 		return nil
 	})
-
-	// Cancel the pg_sleep() commands and wait for their goroutines to finish,
-	// so we can safely close their connections.
-	stopSleeping()
-	wg.Wait()
 }

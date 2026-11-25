@@ -183,7 +183,7 @@ func TestTenantGlobalAggregatedLivebytes(t *testing.T) {
 		val, _ := scrapeMetric(t, r, "sql_aggregated_livebytes", tenant.name)
 
 		if math.Abs(float64(exp-val))/float64(exp) > confidenceLevel {
-			return errors.Newf("expected %d within +/-%.2f, but got %d", exp, confidenceLevel, val)
+			return errors.Newf("expected %d within %.0f%%, but got %d", exp, 100*confidenceLevel, val)
 		}
 		if val <= 0 {
 			return errors.New("livebytes must be greater than 0")

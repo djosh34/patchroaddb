@@ -24,9 +24,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-go
-      # Two test binaries at a time: with go test's default of one per CPU,
-      # the race detector's slowdown leaves the test clusters of four
-      # binaries too little CPU to keep their liveness and leases.
+      # Two test binaries at a time. With go test's default of one per CPU,
+      # four race binaries at once on 4 vCPUs starve their test clusters,
+      # which then miss liveness and lease deadlines.
       - run: build/ci/test.sh test ${{ matrix.shard }} 11 -race -timeout 300m -p 2
 
   logic-race:
