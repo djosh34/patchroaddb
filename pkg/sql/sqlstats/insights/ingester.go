@@ -34,6 +34,8 @@ type concurrentBufferIngester struct {
 	eventBufferCh chan *eventBuffer
 	registry      *lockingRegistry
 	running       uint64
+	// quiesce is the stopper's quiesce channel, set by Start before running.
+	quiesce <-chan struct{}
 }
 
 var _ Writer = &concurrentBufferIngester{}
@@ -61,6 +63,8 @@ type event struct {
 }
 
 func (i *concurrentBufferIngester) Start(ctx context.Context, stopper *stop.Stopper) {
+	i.quiesce = stopper.ShouldQuiesce()
+
 	// This task pulls buffers from the channel and forwards them along to the
 	// underlying registry.
 	_ = stopper.RunAsyncTask(ctx, "insights-ingester", func(ctx context.Context) {
@@ -158,7 +162,13 @@ func newConcurrentBufferIngester(registry *lockingRegistry) *concurrentBufferIng
 		},
 		func(currentWriterIndex int64) {
 			if atomic.LoadUint64(&i.running) == 1 {
-				i.eventBufferCh <- i.guard.eventBuffer
+				// The consumer can stop between the check above and the send.
+				// Then nothing reads the channel, so the send gives up once the
+				// stopper quiesces.
+				select {
+				case i.eventBufferCh <- i.guard.eventBuffer:
+				case <-i.quiesce:
+				}
 			}
 			i.guard.eventBuffer = eventBufferPool.Get().(*eventBuffer)
 		},
