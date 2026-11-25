@@ -155,10 +155,9 @@ func (p *procs) kill(n *proc) bool {
 	defer tick.Stop()
 	var lastErr error
 	for {
-		// pkill exits with status 1 when no process matches.
-		if err := p.root("pkill", "-KILL", "-f", "--", pattern); err != nil && !noMatch(err) {
-			lastErr = err
-		}
+		// pkill exits with status 1 when no process matches. The error, with
+		// sudo's output, is kept for the timeout message.
+		lastErr = p.root("pkill", "-KILL", "-f", "--", pattern)
 		select {
 		case <-done:
 			return true
@@ -168,13 +167,6 @@ func (p *procs) kill(n *proc) bool {
 		case <-tick.C:
 		}
 	}
-}
-
-// noMatch reports whether err is the exit status 1 of pkill, which means
-// that no process matched.
-func noMatch(err error) bool {
-	var exitErr *exec.ExitError
-	return errors.As(err, &exitErr) && exitErr.ExitCode() == 1
 }
 
 // markKilled marks a running process killed and reports whether it ran.
