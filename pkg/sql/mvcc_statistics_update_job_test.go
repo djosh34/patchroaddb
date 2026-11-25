@@ -183,7 +183,7 @@ func TestTenantGlobalAggregatedLivebytes(t *testing.T) {
 		val, _ := scrapeMetric(t, r, "sql_aggregated_livebytes", tenant.name)
 
 		if math.Abs(float64(exp-val))/float64(exp) > confidenceLevel {
-			return errors.Newf("expected within +/-%.2f of %d, but got %d, testVal=%d", exp, val)
+			return errors.Newf("expected %d within +/-%.2f, but got %d", exp, confidenceLevel, val)
 		}
 		if val <= 0 {
 			return errors.New("livebytes must be greater than 0")
@@ -206,10 +206,12 @@ func TestTenantGlobalAggregatedLivebytes(t *testing.T) {
 	// Metrics should be exported for out-of-process secondary tenants, and are
 	// correct, i.e. sql_aggregated_livebytes in SQL = sum(livebytes in KV).
 	t.Run("external secondary tenants", func(t *testing.T) {
-		// Exact match for non stress tests, and allow values to differ by up to
-		// 5% in stress situations.
+		// Exact match for normal runs, and allow values to differ by up to 5%
+		// under stress or the race detector. The tenant keeps writing while the
+		// metric is aggregated and scraped, so on a slow run the two values
+		// rarely meet.
 		confidenceLevel := 0.0
-		if skip.Stress() {
+		if skip.Duress() {
 			confidenceLevel = 0.05
 		}
 		testutils.SucceedsSoon(t, func() error {
